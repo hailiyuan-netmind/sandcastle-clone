@@ -61,13 +61,15 @@ Same tools, wave scheduler, flag and sand economy as the 2D version. Full simula
 
 ![Godot slice: the beach with a wave front crossing the ocean](godot/screenshot.png)
 
-- The shallow-water pipe model now runs as a **GPU compute shader** ([`godot/sim.glsl`](godot/sim.glsl)) on ping-pong RGBA32F field textures, dispatched twice per frame
-- Terrain and water are GPU-displaced planes whose spatial shaders sample the simulation texture directly through `Texture2DRD`, so field data never leaves the GPU
-- Everything is built procedurally from [`godot/main.gd`](godot/main.gd); the whole project is plain text
-- Runs at a steady 60 fps on Apple Silicon (native Metal renderer)
-- Try it: open the folder with Godot 4.7+, or `godot --path godot`. Left click summons a wave, right-drag orbits, wheel zooms. A headless verification mode is built in: `godot --path godot -- --shot=out.png --frames=300 --wave`
+- The whole simulation runs as **GPU compute passes** ([`godot/sim.glsl`](godot/sim.glsl)) on ping-pong RGBA32F field textures: shallow-water pipe model, then a parallel-safe flux rewrite of the sand physics (moisture-dependent angle of repose, flow-driven erosion with downstream deposit), four dispatches per substep
+- Sculpting tools (pour, dig, water, tamp) are applied inside the sand pass via brush push constants, and the sand-bucket economy is tracked with an atomic counter buffer read back at low rate
+- Terrain and water are GPU-displaced planes whose spatial shaders sample the simulation texture directly through `Texture2DRD`, so field data never leaves the GPU; a low-rate CPU shadow copy powers ray picking, the flag and the HUD stats
+- Full game loop: Chinese HUD, wave scheduler with growing waves, plantable flag with washed/undermined detection, reset
+- Everything is built procedurally from [`godot/main.gd`](godot/main.gd); the whole project is plain text. Steady 60 fps on Apple Silicon (native Metal renderer)
+- Try it: open the folder with Godot 4.7+, or `godot --path godot`. Left drag sculpts, right drag orbits, wheel zooms, keys 1-5 switch tools, `[` `]` resize the brush, `N` summons a wave
+- Headless regression mode (builds a wall, digs a moat, plants the flag, summons a wave, saves a screenshot): `godot --path godot -- --shot=out.png --frames=430 --demo`
 
-Still to port: sand dynamics (angle of repose, erosion) as further compute passes, sculpting tools, HUD and the wave scheduler.
+Still to close the gap with the real thing: MPM particle zone for crumbling sand (see research/), sound, tide, scoring.
 
 ## Roadmap ideas
 
