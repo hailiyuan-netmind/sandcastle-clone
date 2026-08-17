@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode cull_back;
 
 uniform sampler2D field_tex : filter_linear, repeat_disable;
-uniform float texel = 0.0052083333; // 1/192
+uniform float texel = 0.0026041667; // 1/384
 uniform vec3 sun_dir = vec3(0.45, 0.62, 0.34);
 
 varying vec2 vuv;
@@ -58,7 +58,7 @@ void fragment() {
 	float hx0 = texture(field_tex, vuv - vec2(texel, 0.0)).r;
 	float hz1 = texture(field_tex, vuv + vec2(0.0, texel)).r;
 	float hz0 = texture(field_tex, vuv - vec2(0.0, texel)).r;
-	vec3 nw = normalize(vec3(-(hx1 - hx0), 2.0, -(hz1 - hz0)));
+	vec3 nw = normalize(vec3(-(hx1 - hx0), 1.0, -(hz1 - hz0)));  // 2 * cell(0.5)
 
 	// 细节法线扰动(有限差分)
 	vec2 wp = vworld.xz;

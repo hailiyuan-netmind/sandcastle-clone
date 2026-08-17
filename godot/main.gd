@@ -6,7 +6,9 @@ extends Node3D
 # Interactive: left drag = tool, right drag = orbit, wheel = zoom, 1-5 tools,
 #              [ ] brush size, N = wave, Space = pause.
 
-const N := 192
+const N := 384            # 模拟网格分辨率
+const CELL := 0.5         # 每格世界尺寸
+const WORLD := N * CELL   # 世界边长 192,与旧版一致
 const SEA := 0.9
 const TOOLS := ["pour", "dig", "water", "tamp", "flag"]
 const TOOL_LABELS := ["🏰 堆沙", "⛏ 挖沙", "💧 洒水", "🔨 夯实", "🚩 插旗"]
@@ -38,7 +40,7 @@ var bucket := 2800.0
 var height_cm := 0
 
 var tool_idx := 0
-var brush_r := 6.0
+var brush_r := 12.0        # 网格单位(0.5 世界单位/格)
 var brushing := false
 var brush_pos := Vector2.ZERO
 
@@ -50,8 +52,8 @@ var flag_washed := false
 var cam_pivot: Node3D
 var cam: Camera3D
 var yaw := 0.34
-var pitch := 0.46
-var dist := 108.0
+var pitch := 0.38
+var dist := 112.0
 var sun_vec := Vector3(0.45, 0.62, 0.34)
 
 var hud_stats: Label
@@ -96,7 +98,7 @@ func _gen_field_image() -> Image:
 		var t := float(z) / float(N)
 		for x in N:
 			var h := 1.55 - 1.35 * smoothstep(0.0, 1.0, clampf((t - 0.18) / 0.55, 0.0, 1.0))
-			h += 0.05 * sin(x * 0.11) + 0.04 * sin(x * 0.05 + z * 0.07) + 0.02 * sin(z * 0.23)
+			h += 0.05 * sin(x * 0.055) + 0.04 * sin(x * 0.025 + z * 0.035) + 0.02 * sin(z * 0.115)
 			h = maxf(0.05, h)
 			var w := maxf(0.0, SEA - h)
 			var m := 1.0 if w > 0.0 else (0.6 if h < SEA + 0.12 else 0.08)
@@ -153,7 +155,7 @@ func _init_compute(img: Image) -> void:
 func _params(dt: float, surge: float, damp: float, mode: int, tool: int) -> PackedByteArray:
 	var f := PackedFloat32Array([
 		dt, SEA, surge, damp,
-		float(mode), float(N), float(tool), 0.0,
+		float(mode), float(N), float(tool), CELL * CELL,
 		brush_pos.x, brush_pos.y, brush_r, 9.0,
 	])
 	return f.to_byte_array()
@@ -285,6 +287,10 @@ func _height_at(gx: float, gz: float) -> float:
 	return lerpf(lerpf(a, b, fx), lerpf(c, d, fx), fz)
 
 
+func _to_grid(pos: Vector3) -> Vector2:
+	return Vector2((pos.x + WORLD * 0.5) / CELL, (pos.z + WORLD * 0.5) / CELL)
+
+
 func _pick_ground(screen_pos: Vector2) -> Vector2:
 	var o := cam.project_ray_origin(screen_pos)
 	var d := cam.project_ray_normal(screen_pos)
@@ -292,20 +298,19 @@ func _pick_ground(screen_pos: Vector2) -> Vector2:
 	var t := 1.0
 	for i in 500:
 		var pos := o + d * t
-		var gx := pos.x + N * 0.5
-		var gz := pos.z + N * 0.5
-		if gx >= 0.0 and gx < N - 1 and gz >= 0.0 and gz < N - 1 and pos.y <= _height_at(gx, gz):
+		var gp := _to_grid(pos)
+		if gp.x >= 0.0 and gp.x < N - 1 and gp.y >= 0.0 and gp.y < N - 1 and pos.y <= _height_at(gp.x, gp.y):
 			var lo := last_t
 			var hi := t
 			for k in 8:
 				var m := (lo + hi) * 0.5
 				var mp := o + d * m
-				if mp.y <= _height_at(mp.x + N * 0.5, mp.z + N * 0.5):
+				var mg := _to_grid(mp)
+				if mp.y <= _height_at(mg.x, mg.y):
 					hi = m
 				else:
 					lo = m
-			var hp := o + d * hi
-			return Vector2(hp.x + N * 0.5, hp.z + N * 0.5)
+			return _to_grid(o + d * hi)
 		if pos.y < -3.0:
 			break
 		last_t = t
@@ -358,7 +363,7 @@ func _plant_flag(gx: int, gz: int) -> void:
 	flag_base_h = px.r
 	flag_washed = false
 	flag_node.visible = true
-	flag_node.position = Vector3(gx - N * 0.5, px.r, gz - N * 0.5)
+	flag_node.position = Vector3(gx * CELL - WORLD * 0.5, px.r, gz * CELL - WORLD * 0.5)
 	_msg("🚩 旗子插好了,守住它!")
 
 
@@ -410,9 +415,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				var p := _next_wave_params()
 				start_wave(p[0], p[1])
 			KEY_BRACKETLEFT:
-				brush_r = maxf(2.0, brush_r - 1.0)
+				brush_r = maxf(4.0, brush_r - 2.0)
 			KEY_BRACKETRIGHT:
-				brush_r = minf(12.0, brush_r + 1.0)
+				brush_r = minf(24.0, brush_r + 2.0)
 			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5:
 				_set_tool(event.keycode - KEY_1)
 
@@ -516,15 +521,15 @@ func _demo_tick() -> void:
 	if f >= 15 and f <= 55:
 		tool_idx = 0
 		brushing = true
-		brush_r = 6.0
-		brush_pos = Vector2(76.0 + (f - 15) * 1.1, 80.0)
+		brush_r = 12.0
+		brush_pos = Vector2(152.0 + (f - 15) * 2.2, 160.0)
 	elif f >= 60 and f <= 84:
 		tool_idx = 1
 		brushing = true
-		brush_pos = Vector2(76.0 + (f - 60) * 1.8, 92.0)
+		brush_pos = Vector2(152.0 + (f - 60) * 3.6, 184.0)
 	elif f == 90:
 		brushing = false
-		_plant_flag(96, 78)
+		_plant_flag(192, 156)
 	elif f == 100:
 		start_wave(0.46, 2.5)
 
@@ -556,9 +561,9 @@ func _exit_tree() -> void:
 
 func _build_terrain() -> void:
 	var plane := PlaneMesh.new()
-	plane.size = Vector2(N, N)
-	plane.subdivide_width = N * 2 - 2
-	plane.subdivide_depth = N * 2 - 2
+	plane.size = Vector2(WORLD, WORLD)
+	plane.subdivide_width = N - 2
+	plane.subdivide_depth = N - 2
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://terrain.gdshader")
 	mat.set_shader_parameter("field_tex", field_tex2d)
@@ -572,9 +577,9 @@ func _build_terrain() -> void:
 
 func _build_water() -> void:
 	var plane := PlaneMesh.new()
-	plane.size = Vector2(N, N)
-	plane.subdivide_width = N * 2 - 2
-	plane.subdivide_depth = N * 2 - 2
+	plane.size = Vector2(WORLD, WORLD)
+	plane.subdivide_width = N - 2
+	plane.subdivide_depth = N - 2
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://water.gdshader")
 	mat.set_shader_parameter("field_tex", field_tex2d)
@@ -613,11 +618,8 @@ func _build_environment() -> void:
 	sun.shadow_blur = 1.6
 	add_child(sun)
 	sun_vec = sun.global_transform.basis.z
-	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = Color(0.55, 0.80, 0.92)
-	sky_mat.sky_horizon_color = Color(0.91, 0.96, 0.98)
-	sky_mat.ground_bottom_color = Color(0.91, 0.90, 0.84)
-	sky_mat.ground_horizon_color = Color(0.91, 0.96, 0.98)
+	var sky_mat := ShaderMaterial.new()
+	sky_mat.shader = load("res://sky.gdshader")
 	var sky := Sky.new()
 	sky.sky_material = sky_mat
 	var env := Environment.new()
@@ -636,6 +638,7 @@ func _build_environment() -> void:
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.82, 0.91, 0.96)
 	env.fog_density = 0.0007
+	env.fog_sky_affect = 0.0
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)

@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_back;
 
 uniform sampler2D field_tex : filter_linear, repeat_disable;
-uniform float texel = 0.0052083333;
+uniform float texel = 0.0026041667; // 1/384
 
 varying vec4 vdat;
 varying vec3 vworld;
@@ -36,7 +36,7 @@ void vertex() {
 	float s1 = textureLod(field_tex, UV + vec2(texel, 0.0), 0.0).r + textureLod(field_tex, UV + vec2(texel, 0.0), 0.0).g;
 	float t0 = textureLod(field_tex, UV - vec2(0.0, texel), 0.0).r + textureLod(field_tex, UV - vec2(0.0, texel), 0.0).g;
 	float t1 = textureLod(field_tex, UV + vec2(0.0, texel), 0.0).r + textureLod(field_tex, UV + vec2(0.0, texel), 0.0).g;
-	NORMAL = normalize(vec3(-(s1 - s0), 2.0, -(t1 - t0)));
+	NORMAL = normalize(vec3(-(s1 - s0), 1.0, -(t1 - t0)));
 }
 
 void fragment() {

@@ -39,10 +39,11 @@ float surfaceAt(ivec2 p) {
 	return f.r + f.g;
 }
 
+// cell size is 0.5 world units at N=384: repose thresholds are slope*cell
 float reposeOf(vec4 f) {
-	if (f.b > 0.85 && f.g > 0.02) { return 0.35; }  // soaked: slumps
-	if (f.b > 0.15) { return 2.6; }                  // damp: holds steep walls
-	return 0.65;                                     // dry: shallow piles
+	if (f.b > 0.85 && f.g > 0.02) { return 0.175; } // soaked: slumps
+	if (f.b > 0.15) { return 1.3; }                  // damp: holds steep walls
+	return 0.325;                                    // dry: shallow piles
 }
 
 void main() {
@@ -50,7 +51,7 @@ void main() {
 	int n = N();
 	if (p.x >= n || p.y >= n) { return; }
 	int mode = int(P.mode);
-	const float g = 32.0;
+	const float g = 128.0;  // rescaled for 0.5-unit cells (keeps world wave speed)
 
 	if (mode == 0) {
 		// ---- water flux: accelerate + clamp outflows ----
@@ -82,7 +83,7 @@ void main() {
 			w += (target - w) * 0.5;
 			if (P.surge > 0.05) {
 				vec4 qq = imageLoad(flux, p);
-				qq.b = max(qq.b, P.surge * 4.0);   // shoreward push (-z)
+				qq.b = max(qq.b, P.surge * 10.0);  // shoreward push (-z)
 				imageStore(flux, p, qq);
 			}
 		}
@@ -92,7 +93,7 @@ void main() {
 		else { m = max(0.0, m - P.dt * 0.008); }
 
 		float foam = f.a * 0.94;
-		if (fl > 1.0 && w > 0.01) { foam = min(1.0, foam + (fl - 1.0) * P.dt * 2.2); }
+		if (fl > 2.0 && w > 0.01) { foam = min(1.0, foam + (fl - 2.0) * P.dt * 1.4); }
 
 		imageStore(field_out, p, vec4(f.r, w, m, foam));
 
@@ -114,9 +115,9 @@ void main() {
 			// erosion: fast water rips sand and carries it along the dominant outflow
 			vec4 wq = imageLoad(flux, p);
 			float fl = (wq.r + wq.g + wq.b + wq.a) / max(0.05, f.g);
-			if (fl > 0.7 && f.g > 0.015) {
+			if (fl > 1.4 && f.g > 0.015) {
 				float band = (f.b > 0.15 && f.b < 0.85) ? 0.45 : 1.0;  // tamped/damp resists
-				float e = min((fl - 0.7) * P.dt * 0.55 * band, min(f.r - 0.02, 0.06));
+				float e = min((fl - 1.4) * P.dt * 0.30 * band, min(f.r - 0.02, 0.03));
 				if (e > 0.0) {
 					float mx = max(max(wq.r, wq.g), max(wq.b, wq.a));
 					if (mx == wq.r) { q.r += e; }
@@ -148,15 +149,16 @@ void main() {
 			float d = distance(vec2(p), vec2(P.bx, P.bz));
 			if (d < P.brad) {
 				float fall = 1.0 - (d / P.brad) * (d / P.brad);
+				// P.unused carries the cell area so the bucket counts world volume
 				if (tool == TOOL_POUR) {
 					float dh = P.brate * P.dt * fall;
 					sand += dh;
 					m = max(m, 0.5);
-					atomicAdd(bucket.delta_milli, -int(dh * 1000.0));
+					atomicAdd(bucket.delta_milli, -int(dh * 1000.0 * P.unused));
 				} else if (tool == TOOL_DIG) {
 					float dh = min(max(sand - 0.02, 0.0), P.brate * P.dt * fall);
 					sand -= dh;
-					atomicAdd(bucket.delta_milli, int(dh * 1000.0));
+					atomicAdd(bucket.delta_milli, int(dh * 1000.0 * P.unused));
 				} else if (tool == TOOL_WATER) {
 					w += 1.5 * P.dt * fall;
 				} else if (tool == TOOL_TAMP) {
