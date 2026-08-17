@@ -52,6 +52,7 @@ var cam: Camera3D
 var yaw := 0.34
 var pitch := 0.46
 var dist := 108.0
+var sun_vec := Vector3(0.45, 0.62, 0.34)
 
 var hud_stats: Label
 var hud_msg: Label
@@ -556,11 +557,12 @@ func _exit_tree() -> void:
 func _build_terrain() -> void:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(N, N)
-	plane.subdivide_width = N - 2
-	plane.subdivide_depth = N - 2
+	plane.subdivide_width = N * 2 - 2
+	plane.subdivide_depth = N * 2 - 2
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://terrain.gdshader")
 	mat.set_shader_parameter("field_tex", field_tex2d)
+	mat.set_shader_parameter("sun_dir", sun_vec)
 	var mi := MeshInstance3D.new()
 	mi.mesh = plane
 	mi.material_override = mat
@@ -571,8 +573,8 @@ func _build_terrain() -> void:
 func _build_water() -> void:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(N, N)
-	plane.subdivide_width = N - 2
-	plane.subdivide_depth = N - 2
+	plane.subdivide_width = N * 2 - 2
+	plane.subdivide_depth = N * 2 - 2
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://water.gdshader")
 	mat.set_shader_parameter("field_tex", field_tex2d)
@@ -603,8 +605,14 @@ func _update_cam() -> void:
 func _build_environment() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-38.0, 35.0, 0.0)
-	sun.light_energy = 0.9
+	sun.light_energy = 1.0
+	sun.light_color = Color(1.0, 0.96, 0.87)
+	sun.shadow_enabled = true
+	sun.light_angular_distance = 1.6
+	sun.directional_shadow_max_distance = 320.0
+	sun.shadow_blur = 1.6
 	add_child(sun)
+	sun_vec = sun.global_transform.basis.z
 	var sky_mat := ProceduralSkyMaterial.new()
 	sky_mat.sky_top_color = Color(0.55, 0.80, 0.92)
 	sky_mat.sky_horizon_color = Color(0.91, 0.96, 0.98)
@@ -616,10 +624,18 @@ func _build_environment() -> void:
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.38
+	env.ambient_light_energy = 0.42
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_exposure = 1.0
+	env.ssao_enabled = true
+	env.ssao_radius = 2.4
+	env.ssao_intensity = 2.0
+	env.glow_enabled = true
+	env.glow_intensity = 0.35
+	env.glow_hdr_threshold = 1.08
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.82, 0.91, 0.96)
-	env.fog_density = 0.0012
+	env.fog_density = 0.0007
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
