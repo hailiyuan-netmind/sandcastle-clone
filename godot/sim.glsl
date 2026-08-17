@@ -101,11 +101,14 @@ void main() {
 		float fl = (q.r + q.g + q.b + q.a + inL + inR + inT + inB) * 0.5 / max(0.05, w);
 
 		if (p.y >= n - 3) {
-			float target = max(0.0, P.sea + P.surge - f.r);
+			// 波前横向变化:浪不再是一堵整齐的墙
+			float surge_l = P.surge * (0.8 + 0.25 * sin(float(p.x) * 0.045 + P.brate * 1.3)
+				+ 0.12 * sin(float(p.x) * 0.013 - P.brate * 0.7));
+			float target = max(0.0, P.sea + surge_l - f.r);
 			w += (target - w) * 0.5;
-			if (P.surge > 0.05) {
+			if (surge_l > 0.05) {
 				vec4 qq = imageLoad(flux, p);
-				qq.b = max(qq.b, P.surge * 10.0);  // shoreward push (-z)
+				qq.b = max(qq.b, surge_l * 10.0);  // shoreward push (-z)
 				imageStore(flux, p, qq);
 			}
 		}

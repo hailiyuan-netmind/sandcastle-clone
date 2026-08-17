@@ -843,6 +843,7 @@ func _build_water() -> void:
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://water.gdshader")
 	mat.set_shader_parameter("field_tex", field_tex2d)
+	mat.set_shader_parameter("sun_dir", sun_vec)
 	var mi := MeshInstance3D.new()
 	mi.mesh = plane
 	mi.material_override = mat

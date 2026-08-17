@@ -83,10 +83,14 @@ void fragment() {
 	col *= 0.82 + 0.36 * d0;
 	col *= 0.93 + 0.14 * h21(floor(wp * 7.0));
 
-	// 水下沙略暗、偏冷
+	// 水下沙略暗、偏冷 + 浅水焦散光网
 	if (f.g > 0.001) {
 		float uw = clamp(f.g * 2.0, 0.0, 1.0);
 		col = mix(col, col * vec3(0.62, 0.72, 0.78), uw * 0.5);
+		float n1 = fbm(wp * 0.55 + vec2(TIME * 0.20, TIME * 0.13));
+		float n2 = fbm(wp * 0.62 - vec2(TIME * 0.16, TIME * 0.22));
+		float ca = pow(clamp(1.0 - abs(n1 + n2 - 1.0) * 2.4, 0.0, 1.0), 3.0);
+		col += vec3(1.0, 0.98, 0.88) * ca * 0.34 * exp(-clamp(f.g, 0.0, 1.4) * 1.7);
 	}
 
 	ALBEDO = pow(col, vec3(2.2));
