@@ -69,7 +69,18 @@ Same tools, wave scheduler, flag and sand economy as the 2D version. Full simula
 - Try it: open the folder with Godot 4.7+, or `godot --path godot`. Left drag sculpts, right drag orbits, wheel zooms, keys 1-5 switch tools, `[` `]` resize the brush, `N` summons a wave
 - Headless regression mode (builds a wall, digs a moat, plants the flag, summons a wave, saves a screenshot): `godot --path godot -- --shot=out.png --frames=430 --demo`
 
-Still to close the gap with the real thing: MPM particle zone for crumbling sand (see research/), sound, tide, scoring.
+### MPM lab (in-engine)
+
+[`godot/mpm.glsl`](godot/mpm.glsl) + [`godot/mpm.gd`](godot/mpm.gd) is a full **3D MLS-MPM solver running in Godot compute shaders**: 100K coupled water and sand particles on a 48^3 grid, six to seven substeps per frame on the GPU.
+
+![3D MPM in Godot: dam-break wave demolishing a sand castle](research/mpm3d-godot.gif)
+
+- Water uses a J-based EOS; sand uses fixed corotated elasticity with snow-style plasticity, including a 3x3 SVD (Jacobi on F^T F) written directly in GLSL
+- P2G scatter uses fixed-point atomic adds; particles render as GPU point sprites fed by a `Texture2DRD` position texture, so nothing round-trips through the CPU
+- Run it: `godot --path godot mpm.tscn`. Right-drag orbits, wheel zooms, `R` resets, Space pauses. Headless: `-- --shot=out.png --frames=N` or `-- --record=dir --frames=N`
+- Next step: bound this solver to an active zone over the beach heightfield (heightfield as collision boundary, erosion spawns particles, settled particles deposit back)
+
+Still to close the gap with the real thing: heightfield-MPM coupling, sound, tide, scoring.
 
 ## Roadmap ideas
 
