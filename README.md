@@ -57,6 +57,7 @@ Same tools, wave scheduler, flag and sand economy as the 2D version. Full simula
 
 ## Roadmap ideas
 
+- Particle-level sand: see [research/](research/) for a working MPM feasibility demo (sand castle vs dam-break wave in Taichi) and the hybrid heightfield-plus-particles plan
 - Sound and ambient audio
 - A rising tide line across a session
 - Scoring and a proper game-over state
