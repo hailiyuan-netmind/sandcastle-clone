@@ -560,7 +560,8 @@ func _update_flag_state() -> void:
 			var sz := clampi(flag_cell.y + dz, 0, N - 1)
 			wmax = maxf(wmax, shadow.get_pixel(sx, sz).g)
 	dbg_max_water = maxf(dbg_max_water, wmax)
-	if wmax > 0.12:
+	# 本格被淹,或邻域出现深水涌浪才算冲走;贴着自家护城河不判死
+	if px.g > 0.12 or wmax > 0.30:
 		flag_washed = true
 		flag_node.visible = false
 		_show_game_over("🚩 旗子被海浪冲走了……")

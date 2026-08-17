@@ -118,7 +118,8 @@ void main() {
 		if (fl > 2.0 && w > 0.01) { foam = min(1.0, foam + (fl - 2.0) * P.dt * 1.4); }
 
 		// 激浪处喷水沫粒子(P.brate 槽位在非工具模式下传的是时间)
-		if (fl > 3.4 && w > 0.06 && hash12(vec2(p) + fract(P.brate) * 61.7) < 0.04) {
+		// P.surge 闸门:只在真正的浪涌期间喷,平静期舔岸水膜不产粒子
+		if (P.surge > 0.08 && fl > 3.4 && w > 0.10 && hash12(vec2(p) + fract(P.brate) * 61.7) < 0.04) {
 			float dirx = (q.g - q.r + (inR - inL)) * 0.5;
 			float dirz = (q.a - q.b + (inB - inT)) * 0.5;
 			vec3 vel = vec3(dirx, 1.8 + fl * 0.25, dirz);
@@ -154,8 +155,9 @@ void main() {
 					else if (mx == wq.g) { q.g += e; }
 					else if (mx == wq.b) { q.b += e; }
 					else { q.a += e; }
-					// 强侵蚀 → 沙粒飞溅进 MPM 层
-					if (e > 0.006 && hash12(vec2(p) * 1.7 + fract(P.brate) * 37.1) < 0.35) {
+					// 强侵蚀 → 沙粒飞溅进 MPM 层(浪涌期 + 水够深才喷,薄水膜的流速放大不算)
+					if (P.surge > 0.08 && f.g > 0.06 && e > 0.008
+							&& hash12(vec2(p) * 1.7 + fract(P.brate) * 37.1) < 0.30) {
 						vec3 vel = vec3((wq.g - wq.r) * 0.4, 1.0 + fl * 0.15, (wq.a - wq.b) * 0.4);
 						trySpawn(cellWorld(p, f.r + 0.35), vel, 1.0);
 					}
