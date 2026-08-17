@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>沙堡 3D · 原型</title>
+<style>
+  *{box-sizing:border-box;margin:0}
+  body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:linear-gradient(#cfeef8,#f6ead1);min-height:100vh;
+       display:flex;flex-direction:column;align-items:center;padding:14px;gap:10px}
+  h1{font-size:20px;color:#1f6b8c}
+  #stats{display:flex;gap:16px;font-size:14px;color:#33566b;flex-wrap:wrap;justify-content:center}
+  #stats b{color:#0d3d55}
+  #toolbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center}
+  button{border:0;border-radius:10px;padding:8px 14px;font-size:14px;background:#fff;
+         box-shadow:0 1px 3px rgba(20,60,80,.2);cursor:pointer;color:#2a4a5e}
+  button:hover{background:#f0fafd}
+  button.active{background:#1f8fbf;color:#fff}
+  button.wave{background:#ff8b5e;color:#fff;font-weight:600}
+  label{font-size:13px;color:#33566b;display:flex;align-items:center;gap:6px}
+  canvas{width:min(1024px,96vw);aspect-ratio:16/9;border-radius:12px;
+         box-shadow:0 6px 24px rgba(20,60,80,.25);touch-action:none;cursor:crosshair;display:block}
+  #msg{min-height:20px;font-size:14px;color:#d05a2a;font-weight:600}
+  #hint{font-size:13px;color:#5a7a8a;text-align:center;max-width:900px;line-height:1.7}
+  a{color:#1f8fbf}
+</style>
+</head>
+<body>
+<h1>🏖️ 沙堡 3D · 原型 v0.1</h1>
+<div id="stats">
+  <span>🌊 扛住海浪 <b id="sWaves">0</b> 波</span>
+  <span>🪣 沙子 <b id="sBucket">0</b></span>
+  <span>⛰️ 最高点 <b id="sHeight">0</b> cm</span>
+  <span>⏳ 下一波 <b id="sNext">-</b></span>
+</div>
+<div id="toolbar">
+  <button data-tool="pour" class="active">🏰 堆沙</button>
+  <button data-tool="dig">⛏️ 挖沙</button>
+  <button data-tool="water">💧 洒水</button>
+  <button data-tool="tamp">🔨 夯实</button>
+  <button data-tool="flag">🚩 插旗</button>
+  <label>笔刷 <input id="brush" type="range" min="2" max="12" value="6"></label>
+  <button id="waveBtn" class="wave">🌊 来一波!</button>
+  <label><input id="auto" type="checkbox" checked> 自动涨浪</label>
+  <button id="reset">🔄 重置沙滩</button>
+</div>
+<canvas id="gl"></canvas>
+<div id="msg"></div>
+<div id="hint">
+  左键用工具塑沙,右键拖动转视角,滚轮缩放。湿沙能立陡墙,被海水泡透会滑塌,离水久了会风干;
+  水流够快就会冲刷搬运沙子。先挖护城河攒沙分浪,🔨夯实城墙,插上🚩等浪来。
+  快捷键:1-5 切工具,[ ] 调笔刷,空格暂停。<a href="index.html">← 回 2D 版</a>
+</div>
+
+<script>
+'use strict';
+// ================= 参数 =================
+const N=192;                 // 高度场分辨率 N x N
+const SEA=0.9;               // 海平面高度
+const SUB=2;                 // 每帧水体子步数
+let DT=1/60;
+
+// ================= 场数据 =================
+const NN=N*N;
+const sand=new Float32Array(NN), water=new Float32Array(NN), moist=new Float32Array(NN);
+const fL=new Float32Array(NN), fR=new Float32Array(NN), fT=new Float32Array(NN), fB=new Float32Array(NN);
+const flow=new Float32Array(NN), foam=new Float32Array(NN);
+const pack=new Float32Array(NN*4);      // 上传 GPU 的打包纹理
+const idx=(x,z)=>z*N+x;
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+
+let bucket=0, survived=0, heightCm=0, paused=false;
+let waveCount=0, waveT=-1, waveDur=0, waveAmp=0, nextTimer=25, simTime=0;
+let flag=null;   // {x,z,baseH,washed}
+
+// ================= 地形生成 =================
+function genTerrain(){
+  for(let z=0;z<N;z++)for(let x=0;x<N;x++){
+    const t=z/N, i=idx(x,z);
+    const s=u=>{const c=clamp(u,0,1);return c*c*(3-2*c);};
+    let h=1.55-1.35*s((t-0.18)/0.55);                  // 后方沙丘→海床
+    h+=0.05*Math.sin(x*0.11)+0.04*Math.sin(x*0.05+z*0.07)+0.02*Math.sin(z*0.23);
+    sand[i]=Math.max(0.05,h);
+    water[i]=Math.max(0,SEA-sand[i]);
+    moist[i]=water[i]>0?1:(sand[i]<SEA+0.12?0.6:0.08);
+    fL[i]=fR[i]=fT[i]=fB[i]=flow[i]=foam[i]=0;
+  }
+  bucket=2800; survived=0; waveCount=0; waveT=-1; nextTimer=25; flag=null; simTime=0;
+}
+
+// ================= 浅水模拟(管道模型) =================
+function waterStep(dt){
+  const g=32, damp=waveT>=0?0.9985:0.996;   // 浪后加大阻尼让海面尽快平静
+  // 1) 通量加速
+  for(let z=0;z<N;z++){
+    const row=z*N;
+    for(let x=0;x<N;x++){
+      const i=row+x;
+      const h=sand[i]+water[i];
+      const dL=x>0  ?h-(sand[i-1]+water[i-1]):0;
+      const dR=x<N-1?h-(sand[i+1]+water[i+1]):0;
+      const dT=z>0  ?h-(sand[i-N]+water[i-N]):0;
+      const dB=z<N-1?h-(sand[i+N]+water[i+N]):0;
+      fL[i]=Math.max(0,(fL[i]+dt*g*dL)*damp);
+      fR[i]=Math.max(0,(fR[i]+dt*g*dR)*damp);
+      fT[i]=Math.max(0,(fT[i]+dt*g*dT)*damp);
+      fB[i]=Math.max(0,(fB[i]+dt*g*dB)*damp);
+      const out=(fL[i]+fR[i]+fT[i]+fB[i])*dt;
+      if(out>1e-9){
+        const k=Math.min(1,water[i]/out);
+        fL[i]*=k;fR[i]*=k;fT[i]*=k;fB[i]*=k;
+      }
+    }
+  }
+  // 2) 水量更新 + 流速
+  for(let z=0;z<N;z++){
+    const row=z*N;
+    for(let x=0;x<N;x++){
+      const i=row+x;
+      const inL=x>0  ?fR[i-1]:0, inR=x<N-1?fL[i+1]:0;
+      const inT=z>0  ?fB[i-N]:0, inB=z<N-1?fT[i+N]:0;
+      water[i]=Math.max(0,water[i]+dt*((inL+inR+inT+inB)-(fL[i]+fR[i]+fT[i]+fB[i])));
+      flow[i]=(fL[i]+fR[i]+fT[i]+fB[i]+inL+inR+inT+inB)*0.5/Math.max(0.05,water[i]);
+    }
+  }
+  // 3) 海侧边界:强制水面 = 海平面 + 浪涌
+  let surge=0.025*Math.sin(simTime*1.6);              // 平时的微浪
+  if(waveT>=0){
+    const p=Math.sin(Math.PI*clamp(waveT/waveDur,0,1));
+    surge+=waveAmp*p*p;
+  }
+  for(let z=N-3;z<N;z++){
+    const row=z*N;
+    for(let x=0;x<N;x++){
+      const i=row+x;
+      const target=Math.max(0,SEA+surge-sand[i]);
+      water[i]+=(target-water[i])*0.5;
+      if(waveT>=0&&surge>0.05){fT[i]=Math.max(fT[i],surge*4);}  // 给浪一个向岸初速
+    }
+  }
+}
+
+// ================= 沙的物理 =================
+// 安息角:干沙易滑,湿沙(适中)能立墙,泡透的沙滑塌
+function reposeOf(i){
+  const m=moist[i];
+  if(m>0.85&&water[i]>0.02)return 0.35;   // 饱和滑塌
+  if(m>0.15)return 2.6;                   // 湿沙:约69°,能雕刻
+  return 0.65;                            // 干沙:约33°
+}
+function sandStep(dt){
+  // 安息角松弛(两趟,交替方向防偏)
+  for(let pass=0;pass<2;pass++){
+    for(let z=1;z<N-1;z++){
+      const row=z*N;
+      for(let x=1;x<N-1;x++){
+        const i=row+x;
+        if(sand[i]<=0.02)continue;
+        const rp=reposeOf(i);
+        // 四邻中最陡者
+        let bi=-1,bd=0;
+        const nb=[i-1,i+1,i-N,i+N];
+        for(let k=0;k<4;k++){
+          const d=sand[i]-sand[nb[k]];
+          if(d>bd){bd=d;bi=nb[k];}
+        }
+        if(bi>=0&&bd>rp){
+          const q=(bd-rp)*0.24;
+          sand[i]-=q;sand[bi]+=q;
+          if(moist[i]>0.3)moist[bi]=Math.max(moist[bi],moist[i]-0.1);
+        }
+      }
+    }
+  }
+  // 湿度:泡水速湿、邻水缓湿、离水风干
+  for(let i=0;i<NN;i++){
+    if(water[i]>0.02)moist[i]=Math.min(1,moist[i]+dt*2.5);
+    else{
+      const wn=(i%N>0&&water[i-1]>0.02)||(i%N<N-1&&water[i+1]>0.02)||(i>=N&&water[i-N]>0.02)||(i<NN-N&&water[i+N]>0.02);
+      if(wn)moist[i]=Math.min(1,moist[i]+dt*0.5);
+      else moist[i]=Math.max(0,moist[i]-dt*0.008);
+    }
+    foam[i]*=0.90;
+  }
+  // 冲刷搬运:快水掏沙,顺流沉积
+  for(let z=1;z<N-1;z++){
+    const row=z*N;
+    for(let x=1;x<N-1;x++){
+      const i=row+x;
+      const fl=flow[i];
+      if(fl>1.0)foam[i]=Math.min(1.0,foam[i]+(fl-1.0)*dt*2.2);
+      if(fl>0.7&&water[i]>0.015&&sand[i]>0.03){
+        let e=(fl-0.7)*dt*0.55;
+        if(moist[i]>0.15&&moist[i]<0.85)e*=0.45;      // 夯实/理想湿度更耐冲
+        e=Math.min(e,sand[i]-0.02,0.05);
+        // 沉到净流出方向的邻格
+        const dx=(fR[i]-fL[i]),dz=(fB[i]-fT[i]);
+        const j=Math.abs(dx)>Math.abs(dz)?(dx>0?i+1:i-1):(dz>0?i+N:i-N);
+        sand[i]-=e;sand[j]+=e*0.85;
+      }
+    }
+  }
+}
+
+// ================= 海浪调度 =================
+function startWave(){
+  if(waveT>=0)return;
+  waveCount++;
+  waveAmp=Math.min(0.16+0.06*waveCount,1.0);
+  waveDur=2.2+0.12*Math.min(waveCount,10);
+  waveT=0;
+  showMsg(`第 ${waveCount} 波海浪来了!浪高 ${Math.round(waveAmp*100)} cm`);
+}
+function waveStep(dt){
+  if(waveT>=0){
+    waveT+=dt;
+    if(waveT>=waveDur+2.5){          // 浪 + 回落缓冲
+      waveT=-1;
+      if(!flag||!flag.washed)survived++;
+      nextTimer=Math.max(8,22-waveCount*1.2);
+    }
+  }else if(autoBox.checked){
+    nextTimer-=dt;
+    if(nextTimer<=0)startWave();
+  }
+}
+
+// ================= 旗子 =================
+function heightAt(x,z){ // 双线性采样沙面
+  x=clamp(x,0,N-1.001);z=clamp(z,0,N-1.001);
+  const x0=x|0,z0=z|0,fx=x-x0,fz=z-z0;
+  const a=sand[idx(x0,z0)],b=sand[idx(x0+1,z0)],c=sand[idx(x0,z0+1)],d=sand[idx(x0+1,z0+1)];
+  return a*(1-fx)*(1-fz)+b*fx*(1-fz)+c*(1-fx)*fz+d*fx*fz;
+}
+function updateFlag(){
+  if(!flag||flag.washed)return;
+  const i=idx(flag.x|0,flag.z|0);
+  if(water[i]>0.28){flag.washed=true;showMsg('🚩 旗子被海浪冲走了……');return;}
+  if(sand[i]<flag.baseH-0.55){flag.washed=true;showMsg('🚩 旗子下的沙被掏空,倒了……');}
+}
+
+// ================= 工具 =================
+let tool='pour';
+function applyToolAt(wx,wz,dt){
+  const r=+brushInput.value;
+  const x0=Math.max(1,Math.round(wx-r)),x1=Math.min(N-2,Math.round(wx+r));
+  const z0=Math.max(1,Math.round(wz-r)),z1=Math.min(N-2,Math.round(wz+r));
+  if(tool==='flag')return;
+  for(let z=z0;z<=z1;z++)for(let x=x0;x<=x1;x++){
+    const d=Math.hypot(x-wx,z-wz);
+    if(d>r)continue;
+    const f=1-(d/r)*(d/r), i=idx(x,z);
+    if(tool==='pour'){
+      if(bucket<=0){showMsg('沙子不够了,先⛏️挖点沙!');return;}
+      const dh=Math.min(bucket,4.5*dt*f);
+      sand[i]+=dh;bucket-=dh;
+      moist[i]=Math.max(moist[i],0.5);
+    }else if(tool==='dig'){
+      const dh=Math.min(sand[i]-0.02,4.5*dt*f);
+      if(dh>0){sand[i]-=dh;bucket+=dh;}
+    }else if(tool==='water'){
+      water[i]+=1.5*dt*f;
+    }else if(tool==='tamp'){
+      moist[i]=0.5;
+    }
+  }
+}
+function plantFlagAt(wx,wz){
+  const x=Math.round(wx),z=Math.round(wz),i=idx(x,z);
+  if(water[i]>0.05){showMsg('水里插不了旗');return;}
+  flag={x,z,baseH:sand[i],washed:false};
+  showMsg('🚩 旗子插好了,守住它!');
+}
+
+// ================= WebGL 渲染 =================
+const cv=document.getElementById('gl');
+const gl=cv.getContext('webgl2',{antialias:true});
+if(!gl){document.body.innerHTML='<h2>需要支持 WebGL2 的浏览器</h2>';throw 0;}
+
+function sh(type,src){
+  const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw 'shader: '+gl.getShaderInfoLog(s);
+  return s;
+}
+function prog(vs,fs){
+  const p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw 'link: '+gl.getProgramInfoLog(p);
+  return p;
+}
+
+// --- 地形/水面共用的网格顶点着色器骨架 ---
+const VS_GRID=`#version 300 es
+uniform mat4 uMVP;uniform int uN;uniform sampler2D uF;uniform int uMode;uniform float uTime;
+out vec3 vPos;out vec3 vNrm;out vec4 vDat;
+float srf(ivec2 p){
+  p=clamp(p,ivec2(0),ivec2(uN-1));
+  vec4 f=texelFetch(uF,p,0);
+  return uMode==0?f.r:f.r+max(f.g,0.0);
+}
+void main(){
+  int ix=gl_VertexID%uN,iz=gl_VertexID/uN;
+  ivec2 p=ivec2(ix,iz);
+  vec4 f=texelFetch(uF,p,0);
+  float h=uMode==0?f.r:f.r+max(f.g,0.0)-0.02;
+  vec3 pos=vec3(float(ix),h,float(iz));
+  float hx=srf(p+ivec2(1,0))-srf(p-ivec2(1,0));
+  float hz=srf(p+ivec2(0,1))-srf(p-ivec2(0,1));
+  vNrm=normalize(vec3(-hx,2.0,-hz));
+  vPos=pos;vDat=f;
+  gl_Position=uMVP*vec4(pos,1.0);
+}`;
+const FS_TERRA=`#version 300 es
+precision highp float;
+in vec3 vPos;in vec3 vNrm;in vec4 vDat;
+uniform vec3 uSun;uniform vec3 uEye;out vec4 o;
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+void main(){
+  vec3 dry=vec3(0.906,0.812,0.588),wet=vec3(0.545,0.42,0.26);
+  float m=smoothstep(0.08,0.9,vDat.b);
+  vec3 col=mix(dry,wet,m);
+  col*=0.93+0.14*hash(floor(vPos.xz));
+  float diff=max(dot(normalize(vNrm),uSun),0.0);
+  col*=(0.5+0.15*vNrm.y)+0.62*diff;
+  if(vDat.g>0.001)col*=1.0-0.22*clamp(vDat.g*2.0,0.0,1.0);
+  float fog=smoothstep(120.0,270.0,distance(vPos,uEye));
+  col=mix(col,vec3(0.82,0.91,0.96),fog);
+  o=vec4(col,1.0);
+}`;
+const FS_WATER=`#version 300 es
+precision highp float;
+in vec3 vPos;in vec3 vNrm;in vec4 vDat;
+uniform vec3 uSun;uniform vec3 uEye;out vec4 o;
+void main(){
+  float d=vDat.g;
+  if(d<0.015)discard;
+  vec3 shallow=vec3(0.45,0.78,0.80),deep=vec3(0.10,0.36,0.56);
+  float t=clamp(d/1.1,0.0,1.0);
+  vec3 col=mix(shallow,deep,t);
+  float alpha=mix(0.42,0.88,t);
+  vec3 Nn=normalize(vNrm),V=normalize(uEye-vPos);
+  float spec=pow(max(dot(reflect(-uSun,Nn),V),0.0),48.0)*0.65;
+  float fr=pow(1.0-max(dot(Nn,V),0.0),2.0);
+  float fm=clamp(vDat.a,0.0,1.0);
+  col=mix(col,vec3(0.97,0.99,1.0),fm*0.8)+spec;
+  alpha=clamp(max(alpha,fm*0.85)+fr*0.15,0.0,0.95);
+  float fog=smoothstep(120.0,270.0,distance(vPos,uEye));
+  col=mix(col,vec3(0.82,0.91,0.96),fog);
+  alpha=mix(alpha,0.9,fog);
+  o=vec4(col,alpha);
+}`;
+const VS_SKY=`#version 300 es
+out vec2 vUV;
+void main(){
+  vec2 p=vec2((gl_VertexID<<1&2),(gl_VertexID&2));
+  vUV=p;gl_Position=vec4(p*2.0-1.0,0.9999,1.0);
+}`;
+const FS_SKY=`#version 300 es
+precision highp float;
+in vec2 vUV;uniform mat4 uInvVP;uniform vec3 uSun;out vec4 o;
+void main(){
+  vec4 a=uInvVP*vec4(vUV*2.0-1.0,-1.0,1.0),b=uInvVP*vec4(vUV*2.0-1.0,1.0,1.0);
+  vec3 dir=normalize(b.xyz/b.w-a.xyz/a.w);
+  float t=clamp(dir.y*1.6+0.25,0.0,1.0);
+  vec3 col=mix(vec3(0.91,0.96,0.98),vec3(0.55,0.80,0.92),t);
+  float s=max(dot(dir,uSun),0.0);
+  col+=vec3(1.0,0.95,0.75)*pow(s,700.0)*1.2+vec3(1.0,0.9,0.6)*pow(s,24.0)*0.18;
+  o=vec4(col,1.0);
+}`;
+const VS_COL=`#version 300 es
+layout(location=0) in vec3 aP;uniform mat4 uMVP;void main(){gl_Position=uMVP*vec4(aP,1.0);}`;
+const FS_COL=`#version 300 es
+precision highp float;uniform vec4 uC;out vec4 o;void main(){o=uC;}`;
+
+const pTerra=prog(VS_GRID,FS_TERRA), pWater=prog(VS_GRID,FS_WATER),
+      pSky=prog(VS_SKY,FS_SKY), pCol=prog(VS_COL,FS_COL);
+
+// 网格索引
+const indices=new Uint32Array((N-1)*(N-1)*6);
+{let k=0;
+ for(let z=0;z<N-1;z++)for(let x=0;x<N-1;x++){
+   const a=z*N+x,b=a+1,c=a+N,d=c+1;
+   indices[k++]=a;indices[k++]=c;indices[k++]=b;
+   indices[k++]=b;indices[k++]=c;indices[k++]=d;
+ }}
+const ibo=gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,indices,gl.STATIC_DRAW);
+const vaoGrid=gl.createVertexArray();
+gl.bindVertexArray(vaoGrid);
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo);
+gl.bindVertexArray(null);
+
+// 场纹理
+const tex=gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D,tex);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA32F,N,N);
+function uploadField(){
+  for(let i=0;i<NN;i++){
+    pack[i*4]=sand[i];pack[i*4+1]=water[i];pack[i*4+2]=moist[i];pack[i*4+3]=foam[i];
+  }
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,N,N,gl.RGBA,gl.FLOAT,pack);
+}
+
+// 小几何(旗子 / 笔刷圈)
+const dynBuf=gl.createBuffer(), dynArr=new Float32Array(3*256);
+const vaoDyn=gl.createVertexArray();
+gl.bindVertexArray(vaoDyn);
+gl.bindBuffer(gl.ARRAY_BUFFER,dynBuf);
+gl.bufferData(gl.ARRAY_BUFFER,dynArr.byteLength,gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+gl.bindVertexArray(null);
+function drawDyn(verts,mode,color,mvp){
+  gl.useProgram(pCol);
+  gl.uniformMatrix4fv(gl.getUniformLocation(pCol,'uMVP'),false,mvp);
+  gl.uniform4fv(gl.getUniformLocation(pCol,'uC'),color);
+  gl.bindVertexArray(vaoDyn);
+  gl.bindBuffer(gl.ARRAY_BUFFER,dynBuf);
+  gl.bufferSubData(gl.ARRAY_BUFFER,0,verts);
+  gl.drawArrays(mode,0,verts.length/3);
+  gl.bindVertexArray(null);
+}
+
+// ================= 迷你矩阵库 =================
+function mPersp(fov,ar,n,f){
+  const t=1/Math.tan(fov/2),o=new Float32Array(16);
+  o[0]=t/ar;o[5]=t;o[10]=(f+n)/(n-f);o[11]=-1;o[14]=2*f*n/(n-f);return o;
+}
+function mLook(e,c,up){
+  const z=norm3(sub3(e,c)),x=norm3(cross3(up,z)),y=cross3(z,x);
+  return new Float32Array([x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,
+    -dot3(x,e),-dot3(y,e),-dot3(z,e),1]);
+}
+function mMul(a,b){
+  const o=new Float32Array(16);
+  for(let c=0;c<4;c++)for(let r=0;r<4;r++){
+    let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];
+    o[c*4+r]=s;
+  }return o;
+}
+function mInv(m){ // 通用 4x4 求逆
+  const inv=new Float32Array(16),a=m;
+  inv[0]=a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
+  inv[4]=-a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
+  inv[8]=a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
+  inv[12]=-a[4]*a[9]*a[14]+a[4]*a[10]*a[13]+a[8]*a[5]*a[14]-a[8]*a[6]*a[13]-a[12]*a[5]*a[10]+a[12]*a[6]*a[9];
+  inv[1]=-a[1]*a[10]*a[15]+a[1]*a[11]*a[14]+a[9]*a[2]*a[15]-a[9]*a[3]*a[14]-a[13]*a[2]*a[11]+a[13]*a[3]*a[10];
+  inv[5]=a[0]*a[10]*a[15]-a[0]*a[11]*a[14]-a[8]*a[2]*a[15]+a[8]*a[3]*a[14]+a[12]*a[2]*a[11]-a[12]*a[3]*a[10];
+  inv[9]=-a[0]*a[9]*a[15]+a[0]*a[11]*a[13]+a[8]*a[1]*a[15]-a[8]*a[3]*a[13]-a[12]*a[1]*a[11]+a[12]*a[3]*a[9];
+  inv[13]=a[0]*a[9]*a[14]-a[0]*a[10]*a[13]-a[8]*a[1]*a[14]+a[8]*a[2]*a[13]+a[12]*a[1]*a[10]-a[12]*a[2]*a[9];
+  inv[2]=a[1]*a[6]*a[15]-a[1]*a[7]*a[14]-a[5]*a[2]*a[15]+a[5]*a[3]*a[14]+a[13]*a[2]*a[7]-a[13]*a[3]*a[6];
+  inv[6]=-a[0]*a[6]*a[15]+a[0]*a[7]*a[14]+a[4]*a[2]*a[15]-a[4]*a[3]*a[14]-a[12]*a[2]*a[7]+a[12]*a[3]*a[6];
+  inv[10]=a[0]*a[5]*a[15]-a[0]*a[7]*a[13]-a[4]*a[1]*a[15]+a[4]*a[3]*a[13]+a[12]*a[1]*a[7]-a[12]*a[3]*a[5];
+  inv[14]=-a[0]*a[5]*a[14]+a[0]*a[6]*a[13]+a[4]*a[1]*a[14]-a[4]*a[2]*a[13]-a[12]*a[1]*a[6]+a[12]*a[2]*a[5];
+  inv[3]=-a[1]*a[6]*a[11]+a[1]*a[7]*a[10]+a[5]*a[2]*a[11]-a[5]*a[3]*a[10]-a[9]*a[2]*a[7]+a[9]*a[3]*a[6];
+  inv[7]=a[0]*a[6]*a[11]-a[0]*a[7]*a[10]-a[4]*a[2]*a[11]+a[4]*a[3]*a[10]+a[8]*a[2]*a[7]-a[8]*a[3]*a[6];
+  inv[11]=-a[0]*a[5]*a[11]+a[0]*a[7]*a[9]+a[4]*a[1]*a[11]-a[4]*a[3]*a[9]-a[8]*a[1]*a[7]+a[8]*a[3]*a[5];
+  inv[15]=a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
+  let det=a[0]*inv[0]+a[1]*inv[4]+a[2]*inv[8]+a[3]*inv[12];
+  det=1/det;
+  for(let i=0;i<16;i++)inv[i]*=det;
+  return inv;
+}
+const sub3=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const cross3=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const dot3=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const norm3=a=>{const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];};
+
+// ================= 相机 =================
+const cam={yaw:0,pitch:0.40,dist:135,tx:N/2,ty:0.8,tz:N*0.50};
+function eyePos(){
+  const cp=Math.cos(cam.pitch);
+  return [cam.tx+cam.dist*cp*Math.sin(cam.yaw),
+          cam.ty+cam.dist*Math.sin(cam.pitch),
+          cam.tz-cam.dist*cp*Math.cos(cam.yaw)];
+}
+let VP=null,invVP=null,eye=null;
+const sunDir=norm3([0.45,0.62,0.34]);
+
+function updateCamera(){
+  const ar=cv.width/cv.height;
+  eye=eyePos();
+  VP=mMul(mPersp(50*Math.PI/180,ar,0.5,900),mLook(eye,[cam.tx,cam.ty,cam.tz],[0,1,0]));
+  invVP=mInv(VP);
+}
+
+// 屏幕→高度场射线求交
+function pickGround(px,py){
+  const r=cv.getBoundingClientRect();
+  const nx=((px-r.left)/r.width)*2-1, ny=1-((py-r.top)/r.height)*2;
+  const a4=mulV(invVP,[nx,ny,-1,1]),b4=mulV(invVP,[nx,ny,1,1]);
+  const o=[a4[0]/a4[3],a4[1]/a4[3],a4[2]/a4[3]];
+  const d=norm3(sub3([b4[0]/b4[3],b4[1]/b4[3],b4[2]/b4[3]],o));
+  let t=1,last=t;
+  for(let s=0;s<600;s++){
+    const x=o[0]+d[0]*t,y=o[1]+d[1]*t,z=o[2]+d[2]*t;
+    if(x>=0&&x<N-1&&z>=0&&z<N-1&&y<=heightAt(x,z)){
+      // 二分回溯精化
+      let lo=last,hi=t;
+      for(let k=0;k<8;k++){
+        const m=(lo+hi)/2,mx=o[0]+d[0]*m,mz=o[2]+d[2]*m;
+        if(o[1]+d[1]*m<=heightAt(mx,mz))hi=m;else lo=m;
+      }
+      return [o[0]+d[0]*hi,o[2]+d[2]*hi];
+    }
+    if(y<-2)break;
+    last=t;t+=0.8;
+  }
+  return null;
+}
+function mulV(m,v){
+  const o=[0,0,0,0];
+  for(let r=0;r<4;r++)o[r]=m[r]*v[0]+m[4+r]*v[1]+m[8+r]*v[2]+m[12+r]*v[3];
+  return o;
+}
+
+// ================= 输入 =================
+const toolBtns=[...document.querySelectorAll('#toolbar [data-tool]')];
+const brushInput=document.getElementById('brush');
+const autoBox=document.getElementById('auto');
+const msgEl=document.getElementById('msg');
+let msgTimer=null;
+function showMsg(t){msgEl.textContent=t;clearTimeout(msgTimer);
+  msgTimer=setTimeout(()=>msgEl.textContent='',3200);}
+function setTool(t){tool=t;toolBtns.forEach(b=>b.classList.toggle('active',b.dataset.tool===t));}
+toolBtns.forEach(b=>b.onclick=()=>setTool(b.dataset.tool));
+document.getElementById('waveBtn').onclick=()=>{
+  if(waveT>=0)showMsg('海浪还在路上!');else startWave();};
+document.getElementById('reset').onclick=()=>{genTerrain();showMsg('沙滩重置好了,开工!');};
+
+const ptr={tooling:false,orbit:false,lx:0,ly:0,px:0,py:0,hover:null};
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('pointerdown',e=>{
+  cv.setPointerCapture(e.pointerId);
+  if(e.button===2){ptr.orbit=true;}
+  else if(e.button===0){
+    if(tool==='flag'){const h=pickGround(e.clientX,e.clientY);if(h)plantFlagAt(h[0],h[1]);}
+    else ptr.tooling=true;
+  }
+  ptr.lx=e.clientX;ptr.ly=e.clientY;ptr.px=e.clientX;ptr.py=e.clientY;
+});
+cv.addEventListener('pointermove',e=>{
+  ptr.px=e.clientX;ptr.py=e.clientY;
+  if(ptr.orbit){
+    cam.yaw+=(e.clientX-ptr.lx)*0.005;
+    cam.pitch=clamp(cam.pitch+(e.clientY-ptr.ly)*0.004,0.15,1.25);
+  }
+  ptr.lx=e.clientX;ptr.ly=e.clientY;
+});
+cv.addEventListener('pointerup',()=>{ptr.tooling=false;ptr.orbit=false;});
+cv.addEventListener('pointerleave',()=>{ptr.tooling=false;ptr.orbit=false;ptr.hover=null;});
+cv.addEventListener('wheel',e=>{
+  e.preventDefault();
+  cam.dist=clamp(cam.dist*(1+e.deltaY*0.001),50,320);
+},{passive:false});
+addEventListener('keydown',e=>{
+  if(e.code==='Space'){paused=!paused;showMsg(paused?'⏸ 已暂停':'▶️ 继续');e.preventDefault();}
+  const tools=['pour','dig','water','tamp','flag'];
+  if(e.key>='1'&&e.key<='5')setTool(tools[+e.key-1]);
+  if(e.key==='[')brushInput.value=Math.max(2,+brushInput.value-1);
+  if(e.key===']')brushInput.value=Math.min(12,+brushInput.value+1);
+});
+
+// ================= HUD =================
+const sWaves=document.getElementById('sWaves'),sBucket=document.getElementById('sBucket'),
+      sHeight=document.getElementById('sHeight'),sNext=document.getElementById('sNext');
+let hudTick=0;
+function hud(){
+  if(hudTick++%10)return;
+  sWaves.textContent=survived;
+  sBucket.textContent=Math.round(bucket);
+  if(hudTick%30===1){
+    let mx=0;
+    for(let z=0;z<(N*0.7)|0;z++){
+      const row=z*N;
+      for(let x=0;x<N;x++)if(sand[row+x]>mx)mx=sand[row+x];
+    }
+    heightCm=Math.max(0,Math.round((mx-SEA)*100));
+  }
+  sHeight.textContent=heightCm;
+  sNext.textContent=waveT>=0?'来袭中!':(autoBox.checked?Math.ceil(nextTimer)+' s':'手动');
+}
+
+// ================= 主循环 =================
+genTerrain();
+function resize(){
+  const r=cv.getBoundingClientRect();
+  const dpr=Math.min(devicePixelRatio||1,1.5);
+  const w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);
+  if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;gl.viewport(0,0,w,h);}
+}
+let lastT=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-lastT)/1000);lastT=now;
+  resize();updateCamera();
+  if(!paused){
+    simTime+=dt;
+    waveStep(dt);
+    for(let s=0;s<SUB;s++)waterStep(dt/SUB);
+    sandStep(dt);
+    updateFlag();
+    if(ptr.tooling){
+      const h=pickGround(ptr.px,ptr.py);
+      if(h)applyToolAt(h[0],h[1],dt);
+    }
+    ptr.hover=pickGround(ptr.px,ptr.py);
+  }
+  uploadField();
+  render();
+  hud();
+  requestAnimationFrame(frame);
+}
+function bindGrid(p){
+  gl.useProgram(p);
+  gl.uniformMatrix4fv(gl.getUniformLocation(p,'uMVP'),false,VP);
+  gl.uniform1i(gl.getUniformLocation(p,'uN'),N);
+  gl.uniform1i(gl.getUniformLocation(p,'uF'),0);
+  gl.uniform1f(gl.getUniformLocation(p,'uTime'),simTime);
+  gl.uniform3fv(gl.getUniformLocation(p,'uSun'),sunDir);
+  gl.uniform3fv(gl.getUniformLocation(p,'uEye'),eye);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+}
+function render(){
+  gl.clearColor(0.8,0.92,0.97,1);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.disable(gl.DEPTH_TEST);
+  // 天空
+  gl.useProgram(pSky);
+  gl.uniformMatrix4fv(gl.getUniformLocation(pSky,'uInvVP'),false,invVP);
+  gl.uniform3fv(gl.getUniformLocation(pSky,'uSun'),sunDir);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.enable(gl.DEPTH_TEST);
+  // 地形
+  bindGrid(pTerra);
+  gl.uniform1i(gl.getUniformLocation(pTerra,'uMode'),0);
+  gl.bindVertexArray(vaoGrid);
+  gl.drawElements(gl.TRIANGLES,indices.length,gl.UNSIGNED_INT,0);
+  gl.bindVertexArray(null);
+  // 旗子
+  if(flag&&!flag.washed){
+    const fx=flag.x,fz=flag.z,fy=heightAt(fx,fz);
+    const w=Math.sin(simTime*4)*0.5;
+    drawDyn(new Float32Array([fx-0.18,fy,fz, fx+0.18,fy,fz, fx+0.18,fy+5.6,fz,
+                              fx-0.18,fy,fz, fx+0.18,fy+5.6,fz, fx-0.18,fy+5.6,fz]),
+            gl.TRIANGLES,[0.42,0.29,0.18,1],VP);
+    drawDyn(new Float32Array([fx,fy+5.6,fz, fx+3.1,fy+4.95,fz+w, fx,fy+4.3,fz]),
+            gl.TRIANGLES,[0.88,0.27,0.18,1],VP);
+  }
+  // 水面
+  bindGrid(pWater);
+  gl.uniform1i(gl.getUniformLocation(pWater,'uMode'),1);
+  gl.uniform3fv(gl.getUniformLocation(pWater,'uEye'),eye);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+  gl.depthMask(false);
+  gl.bindVertexArray(vaoGrid);
+  gl.drawElements(gl.TRIANGLES,indices.length,gl.UNSIGNED_INT,0);
+  gl.bindVertexArray(null);
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  // 笔刷圈
+  if(ptr.hover&&tool!=='flag'){
+    const r=+brushInput.value,seg=48,verts=new Float32Array(seg*3);
+    for(let k=0;k<seg;k++){
+      const a=k/seg*Math.PI*2;
+      const x=clamp(ptr.hover[0]+Math.cos(a)*r,0,N-1.01),z=clamp(ptr.hover[1]+Math.sin(a)*r,0,N-1.01);
+      verts[k*3]=x;verts[k*3+1]=Math.max(heightAt(x,z),SEA-0.02)+0.12;verts[k*3+2]=z;
+    }
+    gl.disable(gl.DEPTH_TEST);
+    drawDyn(verts,gl.LINE_LOOP,[1,1,1,0.8],VP);
+    gl.enable(gl.DEPTH_TEST);
+  }
+}
+gl.enable(gl.DEPTH_TEST);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

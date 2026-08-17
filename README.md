@@ -4,7 +4,7 @@ A tiny browser fan remake ("demake") of [Sandcastle](https://store.steampowered.
 
 Pure HTML5 Canvas plus a falling-sand cellular automaton. Zero dependencies, single file.
 
-**[Play it in your browser](https://hailiyuan-netmind.github.io/sandcastle-clone/)**
+**[Play the 2D game](https://hailiyuan-netmind.github.io/sandcastle-clone/)** · **[Try the 3D prototype](https://hailiyuan-netmind.github.io/sandcastle-clone/3d.html)**
 
 ![Screenshot: a sand fortress with a red flag as a wave rolls in](screenshot.png)
 
@@ -40,6 +40,20 @@ Open `index.html` in any modern browser. No build step, no server.
 - **Moisture** is tracked per sand cell (0 to 255). Contact with water raises it (saturated cells >= 210 turn loose and behave like dry sand); isolation lowers it until the cell dries out
 - **Waves** are driven by a force front moving about 1.3 cells per step toward shore; water cells it passes get re-energized with shoreward momentum, so every wave reliably reaches the beach instead of dissipating mid-ocean. Fast water hitting sand can swap places with it, which chews realistic bites out of walls
 - Rendering writes one RGBA pixel per cell into an offscreen `ImageData`, then upscales 3x with image smoothing disabled for a crisp pixel look
+
+## 3D prototype
+
+[`3d.html`](3d.html) is an early 3D remake of the same game loop, still single-file and dependency-free, written against raw WebGL2:
+
+![3D prototype: sand wall with a flag on a beach as waves break](screenshot-3d.png)
+
+- Heightfield sand on a 192x192 grid, rendered as a GPU-displaced mesh (the CPU only uploads one RGBA32F field texture per frame)
+- Shallow-water "pipe model" ocean: swells surge in from the open boundary, run up the beach, flood moats, then drain back
+- Moisture-dependent angle of repose: dry sand rests at about 33 degrees, damp sand holds near-vertical walls, soaked sand slumps
+- Flow-driven erosion with downstream sediment deposit, plus foam where the water churns
+- Left-drag sculpts with the active tool, right-drag orbits the camera, wheel zooms
+
+Same tools, wave scheduler, flag and sand economy as the 2D version. Full simulation plus rendering costs about 3 ms per frame on an Apple Silicon laptop.
 
 ## Roadmap ideas
 
