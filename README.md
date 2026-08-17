@@ -55,6 +55,20 @@ Open `index.html` in any modern browser. No build step, no server.
 
 Same tools, wave scheduler, flag and sand economy as the 2D version. Full simulation plus rendering costs about 3 ms per frame on an Apple Silicon laptop.
 
+## Godot vertical slice
+
+[`godot/`](godot/) is the start of the real engine build (Godot 4.7, chosen for its text-first workflow and zero cost):
+
+![Godot slice: the beach with a wave front crossing the ocean](godot/screenshot.png)
+
+- The shallow-water pipe model now runs as a **GPU compute shader** ([`godot/sim.glsl`](godot/sim.glsl)) on ping-pong RGBA32F field textures, dispatched twice per frame
+- Terrain and water are GPU-displaced planes whose spatial shaders sample the simulation texture directly through `Texture2DRD`, so field data never leaves the GPU
+- Everything is built procedurally from [`godot/main.gd`](godot/main.gd); the whole project is plain text
+- Runs at a steady 60 fps on Apple Silicon (native Metal renderer)
+- Try it: open the folder with Godot 4.7+, or `godot --path godot`. Left click summons a wave, right-drag orbits, wheel zooms. A headless verification mode is built in: `godot --path godot -- --shot=out.png --frames=300 --wave`
+
+Still to port: sand dynamics (angle of repose, erosion) as further compute passes, sculpting tools, HUD and the wave scheduler.
+
 ## Roadmap ideas
 
 - Particle-level sand: see [research/](research/) for a working MPM feasibility demo (sand castle vs dam-break wave in Taichi) and the hybrid heightfield-plus-particles plan

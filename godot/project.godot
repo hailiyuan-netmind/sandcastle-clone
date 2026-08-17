@@ -1,0 +1,17 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Sandcastle 3D (Godot)"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7")
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
