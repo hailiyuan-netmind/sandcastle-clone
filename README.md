@@ -1,0 +1,56 @@
+# Sandcastle Web Clone
+
+A tiny browser fan remake ("demake") of [Sandcastle](https://store.steampowered.com/app/3216520/Sandcastle/) by Bubblebird Studio: pile up wet sand on the beach, shape a fortress, then watch the waves try to tear it down.
+
+Pure HTML5 Canvas plus a falling-sand cellular automaton. Zero dependencies, single file.
+
+**[Play it in your browser](https://hailiyuan-netmind.github.io/sandcastle-clone/)**
+
+![Screenshot: a sand fortress with a red flag as a wave rolls in](screenshot.png)
+
+## Features
+
+- **Wet sand physics** on a 320x180 cellular automaton: wet sand is cohesive, so you can build vertical walls and 45 degree overhangs; sand soaked by seawater loosens and slumps; sand far from water slowly dries out and crumbles
+- **Waves with momentum**: a surge front sweeps in from the sea, erodes walls on impact, throws up foam, floods moats, then recedes. Each wave is bigger than the last
+- **Five tools**: pour sand, dig, sprinkle water, tamp (tamped sand resists erosion better), plant a flag
+- **Sand is a finite resource**: dig a moat in front of your wall to collect sand and break incoming waves at the same time
+- Plant the flag and see how many waves you can survive
+
+## Controls
+
+| Action | Input |
+| --- | --- |
+| Use current tool | Left mouse drag |
+| Quick dig | Right mouse drag |
+| Switch tools | Buttons, or keys `1` to `5` |
+| Brush size | Slider, or `[` and `]` |
+| Summon a wave | "来一波!" button |
+| Pause | `Space` |
+
+The UI text is in Chinese; the six buttons are: pour, dig, water, tamp, flag, wave.
+
+## Run locally
+
+Open `index.html` in any modern browser. No build step, no server.
+
+## How it works
+
+- Materials (empty, water, wet sand, dry sand, rock, foam) live in a `Uint8Array` grid; the simulation runs 2 steps per animation frame, roughly 120 Hz, scanning bottom-up with alternating direction to avoid bias
+- **Cohesion rule**: a wet sand cell with nothing below only hangs on if a diagonal-below neighbor is itself standing on something solid. This allows corbelled overhangs but collapses floating lattices
+- **Moisture** is tracked per sand cell (0 to 255). Contact with water raises it (saturated cells >= 210 turn loose and behave like dry sand); isolation lowers it until the cell dries out
+- **Waves** are driven by a force front moving about 1.3 cells per step toward shore; water cells it passes get re-energized with shoreward momentum, so every wave reliably reaches the beach instead of dissipating mid-ocean. Fast water hitting sand can swap places with it, which chews realistic bites out of walls
+- Rendering writes one RGBA pixel per cell into an offscreen `ImageData`, then upscales 3x with image smoothing disabled for a crisp pixel look
+
+## Roadmap ideas
+
+- Sound and ambient audio
+- A rising tide line across a session
+- Scoring and a proper game-over state
+- Particle-based foam and spray
+- Touch UI polish for mobile
+
+## Credits
+
+Fan project inspired by [Sandcastle](https://store.steampowered.com/app/3216520/Sandcastle/) by Bubblebird Studio (Fabien Weibel). Not affiliated in any way. Go wishlist the real game.
+
+Licensed under the [MIT License](LICENSE).

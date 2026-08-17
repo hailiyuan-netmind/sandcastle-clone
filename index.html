@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>沙堡 · 网页复刻</title>
+<style>
+  *{box-sizing:border-box;margin:0}
+  body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:linear-gradient(#cfeef8,#f6ead1);min-height:100vh;
+       display:flex;flex-direction:column;align-items:center;padding:14px;gap:10px}
+  h1{font-size:20px;color:#1f6b8c}
+  #stats{display:flex;gap:16px;font-size:14px;color:#33566b;flex-wrap:wrap;justify-content:center}
+  #stats b{color:#0d3d55}
+  #toolbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center}
+  button{border:0;border-radius:10px;padding:8px 14px;font-size:14px;background:#fff;
+         box-shadow:0 1px 3px rgba(20,60,80,.2);cursor:pointer;color:#2a4a5e}
+  button:hover{background:#f0fafd}
+  button.active{background:#1f8fbf;color:#fff}
+  button.wave{background:#ff8b5e;color:#fff;font-weight:600}
+  label{font-size:13px;color:#33566b;display:flex;align-items:center;gap:6px}
+  canvas{width:min(960px,96vw);image-rendering:pixelated;border-radius:12px;
+         box-shadow:0 6px 24px rgba(20,60,80,.25);touch-action:none;cursor:crosshair}
+  #msg{min-height:20px;font-size:14px;color:#d05a2a;font-weight:600}
+  #hint{font-size:13px;color:#5a7a8a;text-align:center;max-width:840px;line-height:1.7}
+</style>
+</head>
+<body>
+<h1>🏖️ 沙堡 · 网页复刻版</h1>
+<div id="stats">
+  <span>🌊 扛住海浪 <b id="sWaves">0</b> 波</span>
+  <span>🪣 沙子 <b id="sBucket">0</b></span>
+  <span>⛰️ 最高点 <b id="sHeight">0</b> cm</span>
+  <span>⏳ 下一波 <b id="sNext">-</b></span>
+</div>
+<div id="toolbar">
+  <button data-tool="pour" class="active">🏰 堆沙</button>
+  <button data-tool="dig">⛏️ 挖沙</button>
+  <button data-tool="water">💧 洒水</button>
+  <button data-tool="tamp">🔨 夯实</button>
+  <button data-tool="flag">🚩 插旗</button>
+  <label>笔刷 <input id="brush" type="range" min="1" max="12" value="4"></label>
+  <button id="waveBtn" class="wave">🌊 来一波!</button>
+  <label><input id="auto" type="checkbox" checked> 自动涨浪</label>
+  <button id="reset">🔄 重置沙滩</button>
+</div>
+<canvas id="game" width="960" height="540"></canvas>
+<div id="msg"></div>
+<div id="hint">
+  左键使用当前工具,右键随时挖沙。沙子有限:先在城墙前挖护城河攒沙、顺便分流海浪;
+  🔨夯实过的湿沙最抗冲刷,被海水泡透的沙会松动垮塌。海浪一波比一波大,插上🚩看你能守多少波。
+  快捷键:1-5 切工具,[ ] 调笔刷,空格暂停。
+</div>
+
+<script>
+'use strict';
+// ---------- 基本参数 ----------
+const W=320, H=180, SCALE=3;
+const EMPTY=0, WATER=1, WET=2, DRY=3, ROCK=4, FOAM=5;
+const SEA=138, ROCKTOP=172;          // 海平面所在行 / 基岩顶部
+const SIM_PER_FRAME=2;               // 每帧模拟步数(约120Hz)
+
+let mat, moist, vx, stamp, noise, surf0;
+let frame=0, bucket=0, survived=0, heightCm=0;
+let waveCount=0, waveActive=0, waveH=0, waveP=0, nextTimer=99999;
+let waveFront=0, waveSpawn=0;
+let paused=false, flag=null;
+
+const rnd=Math.random;
+const idx=(x,y)=>y*W+x;
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+const isSolid=m=>m===WET||m===DRY||m===ROCK;
+const isPass=m=>m===EMPTY||m===FOAM;
+
+// ---------- 地形 ----------
+function smooth(t,a,b){const u=clamp((t-a)/(b-a),0,1);return u*u*(3-2*u);}
+function profile(x){
+  const t=x/W;
+  let s=96+34*smooth(t,0,0.45)+22*smooth(t,0.45,0.62); // 左侧沙丘→海滩→海床
+  s+=Math.sin(x*0.07)*1.5+Math.sin(x*0.023)*2;
+  return Math.min(ROCKTOP-4,s|0);
+}
+function genTerrain(){
+  mat=new Uint8Array(W*H); moist=new Uint8Array(W*H);
+  vx=new Int8Array(W*H); stamp=new Uint8Array(W*H);
+  surf0=new Int16Array(W);
+  if(!noise){noise=new Uint8Array(W*H);for(let i=0;i<W*H;i++)noise[i]=rnd()*14;}
+  for(let x=0;x<W;x++){
+    const s=profile(x); surf0[x]=s;
+    for(let y=s;y<H;y++) mat[idx(x,y)]= y>=ROCKTOP?ROCK:DRY;
+    for(let y=SEA;y<s;y++) if(mat[idx(x,y)]===EMPTY) mat[idx(x,y)]=WATER; // 海水
+  }
+  for(let i=0;i<W*H;i++){ // 岸边沙先浸湿
+    if(mat[i]!==DRY) continue;
+    const x=i%W,y=(i/W)|0;
+    if(hasWaterNeighbor(x,y)){ mat[i]=WET; moist[i]=150; }
+  }
+  bucket=800; survived=0; waveCount=0; waveActive=0; flag=null;
+  nextTimer=99999;
+  for(let k=0;k<150;k++) step();   // 预热让水面稳定
+  nextTimer=3000;                  // 第一波约25秒后
+}
+function hasWaterNeighbor(x,y){
+  return (x>0&&mat[idx(x-1,y)]===WATER)||(x<W-1&&mat[idx(x+1,y)]===WATER)||
+         (y>0&&mat[idx(x,y-1)]===WATER)||(y<H-1&&mat[idx(x,y+1)]===WATER);
+}
+
+// ---------- 元胞移动 ----------
+function mv(i,j){mat[j]=mat[i];moist[j]=moist[i];vx[j]=vx[i];
+  mat[i]=EMPTY;moist[i]=0;vx[i]=0;stamp[j]=frame;}
+function swap(i,j){
+  let t=mat[i];mat[i]=mat[j];mat[j]=t;
+  t=moist[i];moist[i]=moist[j];moist[j]=t;
+  t=vx[i];vx[i]=vx[j];vx[j]=t;
+  stamp[i]=frame;stamp[j]=frame;}
+
+function doDry(i,x,y){
+  const b=i+W, mb=mat[b];
+  if(isPass(mb)){mv(i,b);return;}
+  if(mb===WATER&&rnd()<0.4){swap(i,b);return;}
+  // 碰水变湿,部分吸收水
+  if(x>0&&mat[i-1]===WATER||x<W-1&&mat[i+1]===WATER||mat[i-W]===WATER||mb===WATER){
+    if(rnd()<0.25){
+      if(mb===WATER)mat[b]=EMPTY;
+      else if(x>0&&mat[i-1]===WATER)mat[i-1]=EMPTY;
+      else if(x<W-1&&mat[i+1]===WATER)mat[i+1]=EMPTY;
+      else mat[i-W]=EMPTY;
+    }
+    mat[i]=WET;moist[i]=150;return;
+  }
+  // 干沙容易滑落
+  const d=rnd()<0.5?-1:1;
+  for(const dd of [d,-d]){
+    const nx=x+dd; if(nx<0||nx>=W)continue;
+    const j=b+dd;
+    if(isPass(mat[j])&&isPass(mat[i+dd])){mv(i,j);return;}
+    if(mat[j]===WATER&&rnd()<0.3){swap(i,j);return;}
+  }
+}
+
+function doWet(i,x,y){
+  // 湿度:靠水加湿,离水慢慢风干
+  if(hasWaterNeighbor(x,y)){ if(moist[i]<249)moist[i]+=6; }
+  else if(rnd()<0.02){
+    if(moist[i]>0)moist[i]--;
+    if(moist[i]===0){mat[i]=DRY;return;}
+  }
+  const loose=moist[i]>=210;          // 泡透了→松动
+  const b=i+W, mb=mat[b];
+  if(isPass(mb)){
+    // 斜下方有"踩实的"支撑才悬得住(支撑格自己脚下也要是实心),
+    // 避免散沙互相勾成镂空晶格悬在半空
+    const N=W*H, bl=b-1, br=b+1;
+    const dl=x>0&&isSolid(mat[bl])&&(bl+W>=N||isSolid(mat[bl+W]));
+    const dr=x<W-1&&isSolid(mat[br])&&(br+W>=N||isSolid(mat[br+W]));
+    if(loose||!(dl||dr)){mv(i,b);return;}
+  }else if(mb===WATER&&rnd()<(loose?0.5:0.12)){swap(i,b);return;}
+  if(loose){ // 松沙像干沙一样滑
+    const d=rnd()<0.5?-1:1;
+    for(const dd of [d,-d]){
+      const nx=x+dd; if(nx<0||nx>=W)continue;
+      const j=b+dd;
+      if(isPass(mat[j])&&isPass(mat[i+dd])){mv(i,j);return;}
+      if(mat[j]===WATER&&rnd()<0.4){swap(i,j);return;}
+    }
+  }else if(rnd()<0.04){ // 缓慢沉实:旁边是2格以上深坑时偶尔滑进去,消掉多孔结构
+    const N=W*H, d=rnd()<0.5?-1:1;
+    for(const dd of [d,-d]){
+      const nx=x+dd; if(nx<0||nx>=W)continue;
+      const j=b+dd;
+      if(isPass(mat[i+dd])&&isPass(mat[j])&&j+W<N&&isPass(mat[j+W])){mv(i,j);return;}
+    }
+  }
+}
+
+function doWater(i,x,y){
+  const b=i+W;
+  if(y<H-1&&isPass(mat[b])){mv(i,b);return;}
+  const d0=rnd()<0.5?-1:1;
+  for(const dd of [d0,-d0]){
+    const nx=x+dd; if(nx<0||nx>=W)continue;
+    if(y<H-1&&isPass(mat[b+dd])){mv(i,b+dd);return;}
+  }
+  // 水平流动(带动量)
+  const v=vx[i];
+  const dir=v!==0?(v>0?1:-1):(rnd()<0.5?-1:1);
+  const steps=v!==0?Math.min(Math.abs(v),6):3;
+  let ci=i,cx=x,moved=false;
+  for(let s=0;s<steps;s++){
+    const nx=cx+dir; if(nx<0||nx>=W)break;
+    const ni=ci+dir, tm=mat[ni];
+    if(isPass(tm)){ci=ni;cx=nx;moved=true;continue;}
+    if(tm===WATER){ // 动量在水体里传递→涌浪推进
+      if(Math.abs(v)>1&&Math.abs(vx[ni])<Math.abs(v)){vx[ni]=v>0?v-1:v+1;}
+      break;
+    }
+    if((tm===WET||tm===DRY)&&Math.abs(v)>=2){ // 冲刷:水沙换位
+      let pe=0.05*Math.abs(v);
+      if(tm===DRY)pe*=1.8;
+      else if(moist[ni]>=100&&moist[ni]<=180)pe*=0.5; // 夯实过更结实
+      if(rnd()<pe){
+        mat[ni]=WATER;vx[ni]=v>0?v-1:v+1;moist[ni]=0;stamp[ni]=frame;
+        mat[ci]=WET;moist[ci]=235;vx[ci]=0;stamp[ci]=frame; // 被冲出的沙粒泡透松动
+        const fi=ni-W;
+        if(fi>=0&&mat[fi]===EMPTY){mat[fi]=FOAM;moist[fi]=90;stamp[fi]=frame;}
+        return;
+      }
+    }
+    break;
+  }
+  if(moved){
+    if(ci!==i){mat[i]=EMPTY;vx[i]=0;}
+    mat[ci]=WATER;vx[ci]=v;moist[ci]=0;stamp[ci]=frame;
+    if(v!==0&&rnd()<0.08)vx[ci]=v>0?v-1:v+1;
+    return;
+  }
+  if(v!==0){ if(rnd()<0.3)vx[i]=v>0?v-1:v+1; }
+  else if(y<SEA&&rnd()<0.4){ vx[i]=2; } // 高于海面的水往海里退(回落)
+  else if(rnd()<0.008&&!hasWaterNeighbor(x,y)){ mat[i]=EMPTY; } // 孤立水珠蒸发
+}
+
+function doFoam(i,x,y){
+  moist[i]=moist[i]>3?moist[i]-3:0;
+  if(moist[i]===0){mat[i]=EMPTY;return;}
+  if(y<H-1&&mat[i+W]===EMPTY&&rnd()<0.5){mv(i,i+W);return;}
+  if(rnd()<0.15){
+    const dd=rnd()<0.5?-1:1, nx=x+dd;
+    if(nx>=0&&nx<W&&mat[i+dd]===EMPTY)mv(i,i+dd);
+  }
+}
+
+// ---------- 海洋与海浪 ----------
+function maintainOcean(){
+  for(let x=W-2;x<W;x++)
+    for(let y=SEA;y<surf0[x];y++){
+      const i=idx(x,y);
+      if(mat[i]===EMPTY)mat[i]=WATER;
+    }
+  if(waveActive<=0){ // 退潮吸收:右缘高出海面的水沉回大海
+    for(let x=W-4;x<W;x++)
+      for(let y=SEA-40;y<SEA;y++){
+        const i=idx(x,y);
+        if(mat[i]===WATER&&rnd()<0.2){mat[i]=EMPTY;vx[i]=0;}
+      }
+  }
+}
+function startWave(){
+  if(waveActive>0)return;
+  waveCount++;
+  waveH=Math.min(4+waveCount,16);
+  waveP=Math.min(5+(waveCount>>1),7);
+  waveFront=W-1;      // 浪的前锋位置,匀速向岸扫
+  waveSpawn=80;       // 前80步在右缘注入水体
+  waveActive=300;
+  showMsg(`第 ${waveCount} 波海浪来了!浪高 ${waveH*2} cm`);
+}
+function driveWave(){
+  if(waveSpawn>0){ // 注入隆起的水体
+    waveSpawn--;
+    const top=SEA-waveH;
+    for(let x=W-3;x<W;x++){
+      for(let y=top;y<SEA+4;y++){
+        const i=idx(x,y);
+        if(isPass(mat[i]))mat[i]=WATER;
+        if(mat[i]===WATER)vx[i]=-waveP;
+      }
+      const fi=idx(x,top-1);
+      if(top>0&&mat[fi]===EMPTY){mat[fi]=FOAM;moist[fi]=120;}
+    }
+  }
+  // 前锋力场:扫过的水体持续获得向岸动量,保证浪能到岸
+  waveFront-=1.3;
+  const x0=Math.max(1,waveFront|0), x1=Math.min(W-1,x0+20);
+  const yTop=Math.max(4,SEA-waveH-6), yBot=Math.min(H-2,SEA+18);
+  for(let x=x0;x<x1;x++)for(let y=yTop;y<yBot;y++){
+    const i=idx(x,y);
+    if(mat[i]===WATER&&vx[i]>-waveP)vx[i]=-waveP;
+  }
+  waveActive--;
+  if(waveFront<24)waveActive=0;
+  if(waveActive<=0){waveActive=0;onWaveEnd();}
+}
+function onWaveEnd(){
+  if(!flag||!flag.washed)survived++;
+  nextTimer=Math.max(900,2400-waveCount*120);
+}
+
+// ---------- 旗子 ----------
+function updateFlag(){
+  if(!flag||flag.washed)return;
+  let {x,y}=flag;
+  const here=mat[idx(x,y)];
+  if(here===WATER){flag.washed=true;showMsg('🚩 旗子被海浪冲走了……');return;}
+  while(y<ROCKTOP-1&&!isSolid(mat[idx(x,y+1)])){
+    if(mat[idx(x,y+1)]===WATER){flag.washed=true;showMsg('🚩 旗子被海浪冲走了……');return;}
+    y++;
+  }
+  flag.y=y;
+}
+
+// ---------- 主模拟步 ----------
+function step(){
+  frame=(frame+1)&255;
+  if(waveActive>0)driveWave();
+  else if(autoBox.checked){nextTimer--;if(nextTimer<=0)startWave();}
+  maintainOcean();
+  for(let y=H-2;y>=0;y--){
+    const ltr=((y+frame)&1)===0;
+    const row=y*W;
+    for(let k=0;k<W;k++){
+      const x=ltr?k:W-1-k, i=row+x;
+      if(stamp[i]===frame)continue;
+      const m=mat[i];
+      if(m===EMPTY||m===ROCK)continue;
+      if(m===WATER)doWater(i,x,y);
+      else if(m===WET)doWet(i,x,y);
+      else if(m===DRY)doDry(i,x,y);
+      else if(m===FOAM)doFoam(i,x,y);
+    }
+  }
+  updateFlag();
+}
+
+// ---------- 渲染 ----------
+const cv=document.getElementById('game'), ctx=cv.getContext('2d');
+const off=document.createElement('canvas');off.width=W;off.height=H;
+const octx=off.getContext('2d');
+const img=octx.createImageData(W,H);
+const px=new Uint32Array(img.data.buffer);
+const skyPix=new Uint32Array(W*H);
+(function bakeSky(){
+  const mix=(a,b,t)=>a+(b-a)*t;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const t=clamp(y/SEA,0,1);
+    let r=mix(0x8f,0xea,t),g=mix(0xd3,0xf5,t),b=mix(0xee,0xfb,t);
+    const dx=x-268,dy=y-26,dist=Math.sqrt(dx*dx+dy*dy); // 太阳
+    if(dist<13){r=0xff;g=0xf2;b=0xc0;}
+    else if(dist<22){const u=(22-dist)/9;r=mix(r,0xff,u*.7);g=mix(g,0xf0,u*.7);b=mix(b,0xc8,u*.5);}
+    for(const c of [[70,34,26,7],[150,52,20,5]]){ // 两朵云
+      const ex=(x-c[0])/c[2],ey=(y-c[1])/c[3];
+      const d2=ex*ex+ey*ey;
+      if(d2<1){const u=(1-d2)*.8;r=mix(r,255,u);g=mix(g,255,u);b=mix(b,255,u);}
+    }
+    skyPix[y*W+x]=(255<<24)|(b<<16)|(g<<8)|r;
+  }
+})();
+function render(){
+  for(let i=0;i<W*H;i++){
+    const m=mat[i],n=noise[i];
+    let r,g,b;
+    if(m===EMPTY){px[i]=skyPix[i];continue;}
+    else if(m===WATER){
+      const y=(i/W)|0;
+      const depth=clamp((y-SEA)/34,0,1);
+      const surface=i>=W&&mat[i-W]===EMPTY;
+      const moving=Math.abs(vx[i])>=3;
+      r=46-depth*18+(surface?60:0)+(moving?50:0);
+      g=143-depth*40+(surface?50:0)+(moving?40:0);
+      b=191-depth*40+(surface?40:0)+(moving?30:0);
+    }
+    else if(m===WET){
+      const t=moist[i]/255;
+      r=207-t*90+n;g=167-t*75+n;b=111-t*50+(n>>1);
+    }
+    else if(m===DRY){r=226+((n-7))|0;g=203+(n-7);b=140+(n-7);}
+    else if(m===ROCK){r=128+(n-7);g=119+(n-7);b=106+(n-7);}
+    else {r=242;g=250;b=255;} // FOAM
+    px[i]=(255<<24)|(clamp(b|0,0,255)<<16)|(clamp(g|0,0,255)<<8)|clamp(r|0,0,255);
+  }
+  octx.putImageData(img,0,0);
+  ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(off,0,0,cv.width,cv.height);
+  if(flag&&!flag.washed){
+    const fx=flag.x*SCALE+1,fy=flag.y*SCALE;
+    ctx.fillStyle='#6b4a2f';ctx.fillRect(fx,fy-30,3,30);
+    ctx.fillStyle='#e0442e';
+    ctx.beginPath();ctx.moveTo(fx+3,fy-30);ctx.lineTo(fx+21,fy-24);ctx.lineTo(fx+3,fy-18);
+    ctx.closePath();ctx.fill();
+  }
+  if(mouse.in){ // 笔刷圈
+    ctx.strokeStyle='rgba(255,255,255,.75)';ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.arc(mouse.px,mouse.py,brushInput.value*SCALE,0,Math.PI*2);ctx.stroke();
+  }
+}
+
+// ---------- 工具与输入 ----------
+const toolBtns=[...document.querySelectorAll('#toolbar [data-tool]')];
+const brushInput=document.getElementById('brush');
+const autoBox=document.getElementById('auto');
+const msgEl=document.getElementById('msg');
+let tool='pour', msgTimer=null;
+function showMsg(t){msgEl.textContent=t;clearTimeout(msgTimer);
+  msgTimer=setTimeout(()=>msgEl.textContent='',3200);}
+function setTool(t){tool=t;toolBtns.forEach(b=>b.classList.toggle('active',b.dataset.tool===t));}
+toolBtns.forEach(b=>b.onclick=()=>setTool(b.dataset.tool));
+document.getElementById('waveBtn').onclick=()=>{
+  if(waveActive>0)showMsg('海浪还在路上!');else startWave();};
+document.getElementById('reset').onclick=()=>{genTerrain();showMsg('沙滩重置好了,开工!');};
+
+const mouse={down:false,btn:0,gx:0,gy:0,pgx:0,pgy:0,px:0,py:0,in:false};
+function toGrid(e){
+  const r=cv.getBoundingClientRect();
+  mouse.px=(e.clientX-r.left)*(cv.width/r.width);
+  mouse.py=(e.clientY-r.top)*(cv.height/r.height);
+  mouse.gx=clamp(mouse.px/SCALE|0,0,W-1);
+  mouse.gy=clamp(mouse.py/SCALE|0,0,H-1);
+}
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('pointerdown',e=>{
+  cv.setPointerCapture(e.pointerId);
+  toGrid(e);mouse.down=true;mouse.btn=e.button;
+  mouse.pgx=mouse.gx;mouse.pgy=mouse.gy;
+  if(tool==='flag'&&e.button===0){plantFlag(mouse.gx);return;}
+  applyLine();
+});
+cv.addEventListener('pointermove',e=>{
+  toGrid(e);mouse.in=true;
+  if(mouse.down&&tool!=='flag'){applyLine();}
+  mouse.pgx=mouse.gx;mouse.pgy=mouse.gy;
+});
+cv.addEventListener('pointerup',()=>mouse.down=false);
+cv.addEventListener('pointerleave',()=>{mouse.in=false;mouse.down=false;});
+
+function plantFlag(x){
+  for(let y=8;y<ROCKTOP;y++){
+    if(isSolid(mat[idx(x,y)])){
+      if(mat[idx(x,y)]===ROCK){showMsg('这里插不了旗');return;}
+      flag={x,y:y-1,washed:false};showMsg('🚩 旗子插好了,守住它!');return;
+    }
+    if(mat[idx(x,y)]===WATER){showMsg('水里插不了旗');return;}
+  }
+}
+function applyLine(){
+  const steps=Math.max(Math.abs(mouse.gx-mouse.pgx),Math.abs(mouse.gy-mouse.pgy),1);
+  for(let s=0;s<=steps;s++){
+    const gx=Math.round(mouse.pgx+(mouse.gx-mouse.pgx)*s/steps);
+    const gy=Math.round(mouse.pgy+(mouse.gy-mouse.pgy)*s/steps);
+    applyTool(gx,gy);
+  }
+}
+function applyTool(cx,cy){
+  const r=+brushInput.value, useTool=mouse.btn===2?'dig':tool;
+  for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+    if(dx*dx+dy*dy>r*r)continue;
+    const x=cx+dx,y=cy+dy;
+    if(x<0||x>=W||y<0||y>=H)continue;
+    const i=idx(x,y),m=mat[i];
+    if(useTool==='pour'){
+      if(bucket<=0){showMsg('沙子不够了,先⛏️挖点沙!');return;}
+      if((isPass(m)||m===WATER)&&rnd()<0.75){mat[i]=WET;moist[i]=150;vx[i]=0;bucket--;}
+    }else if(useTool==='dig'){
+      if(m===WET||m===DRY){mat[i]=EMPTY;moist[i]=0;bucket++;}
+      else if(m===FOAM)mat[i]=EMPTY;
+    }else if(useTool==='water'){
+      if(m===EMPTY&&rnd()<0.25){mat[i]=WATER;vx[i]=0;}
+    }else if(useTool==='tamp'){
+      if(m===WET||m===DRY){mat[i]=WET;moist[i]=145;}
+    }
+  }
+}
+
+// ---------- HUD ----------
+const sWaves=document.getElementById('sWaves'),sBucket=document.getElementById('sBucket'),
+      sHeight=document.getElementById('sHeight'),sNext=document.getElementById('sNext');
+let hudTick=0;
+function hud(){
+  if(hudTick++%10)return;
+  sWaves.textContent=survived;
+  sBucket.textContent=bucket;
+  if(hudTick%30===1){
+    let minY=SEA;
+    for(let y=8;y<SEA;y++){
+      const row=y*W;
+      for(let x=4;x<W-70;x++){
+        const m=mat[row+x];
+        if(m===WET||m===DRY){minY=y;y=SEA;break;}
+      }
+    }
+    heightCm=(SEA-minY)*2;
+  }
+  sHeight.textContent=heightCm;
+  sNext.textContent=waveActive>0?'来袭中!':
+    (autoBox.checked?Math.ceil(nextTimer/120)+' s':'手动');
+}
+
+// ---------- 键盘 ----------
+addEventListener('keydown',e=>{
+  if(e.code==='Space'){paused=!paused;showMsg(paused?'⏸ 已暂停':'▶️ 继续');e.preventDefault();}
+  const tools=['pour','dig','water','tamp','flag'];
+  if(e.key>='1'&&e.key<='5')setTool(tools[+e.key-1]);
+  if(e.key==='[')brushInput.value=Math.max(1,+brushInput.value-1);
+  if(e.key===']')brushInput.value=Math.min(12,+brushInput.value+1);
+});
+
+// ---------- 主循环 ----------
+genTerrain();
+(function loop(){
+  if(!paused){
+    for(let s=0;s<SIM_PER_FRAME;s++)step();
+    if(mouse.down&&tool!=='flag')applyLine();
+  }
+  render();hud();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
