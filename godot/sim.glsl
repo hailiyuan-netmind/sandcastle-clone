@@ -117,8 +117,8 @@ void main() {
 		if (w > 0.02) { m = min(1.0, m + P.dt * 2.5); }
 		else { m = max(0.0, m - P.dt * 0.008); }
 
-		float foam = f.a * 0.94;
-		if (fl > 2.0 && w > 0.01) { foam = min(1.0, foam + (fl - 2.0) * P.dt * 1.4); }
+		float foam = f.a * 0.92;
+		if (fl > 2.2 && w > 0.01) { foam = min(1.0, foam + (fl - 2.2) * P.dt * 1.1); }
 
 		// 激浪处喷水沫粒子(P.brate 槽位在非工具模式下传的是时间)
 		// P.surge 闸门:只在真正的浪涌期间喷,平静期舔岸水膜不产粒子

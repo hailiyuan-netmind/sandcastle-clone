@@ -857,6 +857,12 @@ func _build_camera() -> void:
 	add_child(cam_pivot)
 	cam = Camera3D.new()
 	cam.fov = 50.0
+	var attr := CameraAttributesPractical.new()
+	attr.dof_blur_far_enabled = true
+	attr.dof_blur_far_distance = 210.0
+	attr.dof_blur_far_transition = 90.0
+	attr.dof_blur_amount = 0.055
+	cam.attributes = attr
 	cam_pivot.add_child(cam)
 	_update_cam()
 
@@ -901,15 +907,45 @@ func _fill_audio() -> void:
 		audio_pb.push_frame(Vector2(s, s))
 
 
+func _build_sandbox_frame() -> void:
+	# диорама:玩具沙盘的木框 + 桌面背景
+	var wood := StandardMaterial3D.new()
+	wood.albedo_color = Color(0.44, 0.32, 0.21)
+	wood.roughness = 0.82
+	for i in 4:
+		var wall := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		var horizontal := i < 2
+		bm.size = Vector3(WORLD + 8.0, 3.6, 4.0) if horizontal else Vector3(4.0, 3.6, WORLD + 8.0)
+		wall.mesh = bm
+		var off := WORLD * 0.5 + 2.0
+		wall.position = [Vector3(0, -0.3, -off), Vector3(0, -0.3, off),
+			Vector3(-off, -0.3, 0), Vector3(off, -0.3, 0)][i]
+		wall.material_override = wood
+		add_child(wall)
+	var table := MeshInstance3D.new()
+	var pm := PlaneMesh.new()
+	pm.size = Vector2(1200.0, 1200.0)
+	table.mesh = pm
+	table.position = Vector3(0.0, -2.12, 0.0)
+	var tm := StandardMaterial3D.new()
+	tm.albedo_color = Color(0.46, 0.35, 0.245)
+	tm.roughness = 1.0
+	table.material_override = tm
+	table.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(table)
+
+
 func _build_environment() -> void:
+	_build_sandbox_frame()
 	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-38.0, 35.0, 0.0)
-	sun.light_energy = 1.0
-	sun.light_color = Color(1.0, 0.96, 0.87)
+	sun.rotation_degrees = Vector3(-34.0, 41.0, 0.0)
+	sun.light_energy = 0.95
+	sun.light_color = Color(1.0, 0.94, 0.82)
 	sun.shadow_enabled = true
-	sun.light_angular_distance = 1.6
+	sun.light_angular_distance = 0.0
 	sun.directional_shadow_max_distance = 320.0
-	sun.shadow_blur = 1.6
+	sun.shadow_blur = 1.8
 	add_child(sun)
 	sun_vec = sun.global_transform.basis.z
 	var sky_mat := ShaderMaterial.new()
@@ -930,8 +966,8 @@ func _build_environment() -> void:
 	env.glow_intensity = 0.35
 	env.glow_hdr_threshold = 1.08
 	env.fog_enabled = true
-	env.fog_light_color = Color(0.82, 0.91, 0.96)
-	env.fog_density = 0.0007
+	env.fog_light_color = Color(0.88, 0.90, 0.90)
+	env.fog_density = 0.00035
 	env.fog_sky_affect = 0.0
 	var we := WorldEnvironment.new()
 	we.environment = env

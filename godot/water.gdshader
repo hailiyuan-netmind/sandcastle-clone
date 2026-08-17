@@ -107,15 +107,20 @@ void fragment() {
 	float F = 0.02 + 0.98 * pow(1.0 - max(dot(nw, vdir), 0.0), 5.0);
 	vec3 col = mix(water_col, sky_ref, clamp(F, 0.0, 0.5));
 
-	// ---- 泡沫:模拟泡沫 + 岸线带 + 涌浪浪尖,带流动纹理 ----
+	// ---- 泡沫:蕾丝化 —— 脊状噪声细丝网络,只在泡沫源处显影 ----
 	float crest = smoothstep(0.082, 0.112, vswell)
 		* smoothstep(0.45, 0.8, vnoise(wp * 2.6 + TIME * vec2(0.4, 0.22))) * 0.5;
 	float edge = 1.0 - smoothstep(0.015, 0.09, d);
-	float band = edge * smoothstep(0.35, 0.75, vnoise(wp * 1.4 + TIME * 0.35));
-	float fm = clamp(max(vdat.a, max(band, crest * 0.6)), 0.0, 1.0);
-	float ftex = 0.45 + 0.55 * vnoise(wp * 3.6 + vec2(TIME * 0.42, -TIME * 0.26));
-	fm *= 0.35 + 0.65 * ftex;
-	col = mix(col, pow(vec3(0.96, 0.99, 1.0), vec3(2.2)) * (0.7 + 0.3 * ftex), clamp(fm, 0.0, 1.0) * 0.9);
+	float band = edge * smoothstep(0.3, 0.7, vnoise(wp * 1.4 + TIME * 0.35));
+	float fm_src = clamp(max(vdat.a, max(band, crest * 0.6)), 0.0, 1.0);
+	// 两个尺度的脊线(1-|2n-1|)叠成有孔洞的丝网,随时间缓慢游移
+	float lace1 = 1.0 - abs(2.0 * vnoise(wp * 1.15 + TIME * vec2(0.10, -0.055)) - 1.0);
+	float lace2 = 1.0 - abs(2.0 * vnoise(wp * 2.45 - TIME * vec2(0.06, 0.115)) - 1.0);
+	float lace = pow(clamp(lace1 * 0.62 + lace2 * 0.55, 0.0, 1.0), 2.4);
+	float fm = smoothstep(0.22, 0.6, fm_src * (0.25 + 1.55 * lace));
+	// 泡沫源很强时中心仍然填实(浪头翻滚处),弱时只剩丝网
+	fm = max(fm, smoothstep(0.75, 0.98, fm_src) * 0.85);
+	col = mix(col, pow(vec3(0.96, 0.99, 1.0), vec3(2.2)) * (0.72 + 0.28 * lace), clamp(fm, 0.0, 1.0) * 0.92);
 
 	// ---- 岸缘软融合:水薄处淡出成湿缘 ----
 	float shore_fade = clamp(thick / 0.35, 0.0, 1.0);

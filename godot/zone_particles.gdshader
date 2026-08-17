@@ -21,7 +21,7 @@ void vertex() {
 		}
 		COLOR = vec4(col, 1.0);
 		float dist = length((MODELVIEW_MATRIX * vec4(pdat.xyz, 1.0)).xyz);
-		POINT_SIZE = clamp(520.0 / max(dist, 1.0), 1.5, 9.0);
+		POINT_SIZE = clamp(420.0 / max(dist, 1.0), 1.0, 6.5);
 	}
 }
 
