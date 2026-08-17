@@ -52,6 +52,7 @@ var shadow_tick := 0
 
 var sim_time := 0.0
 var paused := false
+var sea_level := SEA          # 涨潮:每波过后上升
 var wave_t := -1.0
 var wave_amp := 0.0
 var wave_dur := 0.0
@@ -61,6 +62,8 @@ var auto_waves := true
 var survived := 0
 var bucket := 2800.0
 var height_cm := 0
+var surge_now := 0.0          # 供音效使用的当前浪涌强度
+var game_over := false
 
 var tool_idx := 0
 var brush_r := 12.0        # 网格单位(0.5 世界单位/格)
@@ -71,6 +74,7 @@ var flag_node: Node3D
 var flag_cell := Vector2i(-1, -1)
 var flag_base_h := 0.0
 var flag_washed := false
+var dbg_max_water := 0.0
 
 var cam_pivot: Node3D
 var cam: Camera3D
@@ -83,6 +87,12 @@ var hud_stats: Label
 var hud_msg: Label
 var msg_timer := 0.0
 var tool_buttons := []
+var ui_font: SystemFont
+var go_panel: Control
+var go_stats: Label
+var audio_pb: AudioStreamGeneratorPlayback
+var audio_lp := 0.0
+var brush_env := 0.0
 
 var shot_path := ""
 var shot_frames := 90
@@ -117,6 +127,7 @@ func _ready() -> void:
 	_build_zone_particles()
 	_build_flag()
 	_build_hud()
+	_build_audio()
 
 
 # ---------------- field / compute ----------------
@@ -261,7 +272,7 @@ func _zparams(mode: int) -> PackedByteArray:
 
 func _params(dt: float, surge: float, damp: float, mode: int, tool: int) -> PackedByteArray:
 	var f := PackedFloat32Array([
-		dt, SEA, surge, damp,
+		dt, sea_level, surge, damp,
 		float(mode), float(N), float(tool), CELL * CELL,
 		brush_pos.x, brush_pos.y, brush_r, 9.0 if mode == 3 else sim_time,
 	])
@@ -371,7 +382,9 @@ func _process(delta: float) -> void:
 			wave_t = -1.0
 			if flag_cell.x < 0 or not flag_washed:
 				survived += 1
+			sea_level = minf(1.32, sea_level + 0.018)   # 涨潮
 			next_timer = maxf(8.0, 22.0 - wave_count * 1.2)
+	surge_now = clampf(surge / 0.7, 0.0, 1.0)
 
 	if demo:
 		_demo_tick()
@@ -394,6 +407,7 @@ func _process(delta: float) -> void:
 		msg_timer -= dt
 		if msg_timer <= 0.0:
 			hud_msg.text = ""
+	_fill_audio()
 
 	if record_dir != "":
 		if frame_count % 3 == 0 and frame_count <= shot_frames:
@@ -539,14 +553,31 @@ func _update_flag_state() -> void:
 		return
 	var px := shadow.get_pixel(flag_cell.x, flag_cell.y)
 	flag_node.position.y = px.r
-	if px.g > 0.28:
+	var wmax := 0.0
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			var sx := clampi(flag_cell.x + dx, 0, N - 1)
+			var sz := clampi(flag_cell.y + dz, 0, N - 1)
+			wmax = maxf(wmax, shadow.get_pixel(sx, sz).g)
+	dbg_max_water = maxf(dbg_max_water, wmax)
+	if wmax > 0.12:
 		flag_washed = true
 		flag_node.visible = false
-		_msg("🚩 旗子被海浪冲走了……")
+		_show_game_over("🚩 旗子被海浪冲走了……")
 	elif px.r < flag_base_h - 0.55:
 		flag_washed = true
 		flag_node.visible = false
-		_msg("🚩 旗子下的沙被掏空,倒了……")
+		_show_game_over("🚩 旗子下的沙被掏空,倒了……")
+
+
+func _show_game_over(reason: String) -> void:
+	if game_over:
+		return
+	game_over = true
+	auto_waves = false
+	go_stats.text = "%s\n\n守住海浪  %d 波\n最高沙堡  %d cm\n最终潮位  +%d cm" \
+		% [reason, survived, height_cm, int((sea_level - SEA) * 100.0)]
+	go_panel.visible = true
 
 
 # ---------------- input ----------------
@@ -600,6 +631,7 @@ func _set_tool(i: int) -> void:
 func _build_hud() -> void:
 	var font := SystemFont.new()
 	font.font_names = ["PingFang SC", "Heiti SC", "Arial Unicode MS"]
+	ui_font = font
 	var layer := CanvasLayer.new()
 	add_child(layer)
 
@@ -642,6 +674,48 @@ func _build_hud() -> void:
 	hud_msg.add_theme_font_size_override("font_size", 19)
 	hud_msg.add_theme_color_override("font_color", Color(0.82, 0.35, 0.16))
 	top.add_child(hud_msg)
+
+	# ---- Game Over 结算面板 ----
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	layer.add_child(center)
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.06, 0.18, 0.26, 0.88)
+	sb.corner_radius_top_left = 16
+	sb.corner_radius_top_right = 16
+	sb.corner_radius_bottom_left = 16
+	sb.corner_radius_bottom_right = 16
+	sb.content_margin_left = 36.0
+	sb.content_margin_right = 36.0
+	sb.content_margin_top = 26.0
+	sb.content_margin_bottom = 26.0
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = "🌊 沙堡陷落 🌊"
+	title.add_theme_font_override("font", font)
+	title.add_theme_font_size_override("font_size", 34)
+	title.add_theme_color_override("font_color", Color(1.0, 0.92, 0.75))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(title)
+	go_stats = Label.new()
+	go_stats.add_theme_font_override("font", font)
+	go_stats.add_theme_font_size_override("font_size", 20)
+	go_stats.add_theme_color_override("font_color", Color(0.92, 0.96, 0.98))
+	go_stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(go_stats)
+	var again := Button.new()
+	again.text = "🔄 再来一局"
+	again.add_theme_font_override("font", font)
+	again.add_theme_font_size_override("font_size", 20)
+	again.pressed.connect(_reset)
+	vb.add_child(again)
+	go_panel = center
+	go_panel.visible = false
 	_update_hud()
 
 
@@ -655,10 +729,10 @@ func _update_hud() -> void:
 	for z in range(0, int(N * 0.7), 3):
 		for x in range(0, N, 3):
 			mx = maxf(mx, shadow.get_pixel(x, z).r)
-	height_cm = maxi(0, int((mx - SEA) * 100.0))
+	height_cm = maxi(0, int((mx - sea_level) * 100.0))
 	var next_s := "来袭中!" if wave_t >= 0.0 else ("%d s" % int(ceil(next_timer)) if auto_waves else "手动")
-	hud_stats.text = "🌊 扛住海浪 %d 波   🪣 沙子 %d   ⛰ 最高点 %d cm   ⏳ 下一波 %s   笔刷 %d" \
-		% [survived, int(bucket), height_cm, next_s, int(brush_r)]
+	hud_stats.text = "🌊 扛住海浪 %d 波   🪣 沙子 %d   ⛰ 最高点 %d cm   🌡 潮位 +%d cm   ⏳ 下一波 %s   笔刷 %d" \
+		% [survived, int(bucket), height_cm, int((sea_level - SEA) * 100.0), next_s, int(brush_r)]
 
 
 func _reset() -> void:
@@ -676,8 +750,14 @@ func _reset() -> void:
 	wave_count = 0
 	wave_t = -1.0
 	next_timer = 25.0
+	sea_level = SEA
 	flag_cell = Vector2i(-1, -1)
+	flag_washed = false
 	flag_node.visible = false
+	game_over = false
+	auto_waves = true
+	if go_panel:
+		go_panel.visible = false
 	_msg("沙滩重置好了,开工!")
 
 
@@ -696,9 +776,9 @@ func _demo_tick() -> void:
 		brush_pos = Vector2(152.0 + (f - 60) * 3.6, 184.0)
 	elif f == 90:
 		brushing = false
-		_plant_flag(192, 156)
+		_plant_flag(192, 178)   # 故意插在墙前洼地,测试旗子被冲走的结算流程
 	elif f == 100:
-		start_wave(0.46, 2.5)
+		start_wave(1.0, 2.8)
 
 
 # ---------------- scene building ----------------
@@ -709,7 +789,12 @@ func _take_shot() -> void:
 	img.save_png(shot_path)
 	print("shot saved: ", shot_path, "  fps=", Engine.get_frames_per_second(),
 		"  bucket=", int(bucket), "  survived=", survived,
-		"  flag_washed=", flag_washed, "  height_cm=", height_cm)
+		"  flag_washed=", flag_washed, "  height_cm=", height_cm,
+		"  game_over=", game_over)
+	if flag_cell.x >= 0:
+		var px := shadow.get_pixel(flag_cell.x, flag_cell.y)
+		print("flag cell=", flag_cell, " sand=", "%.2f" % px.r, " water=", "%.2f" % px.g,
+			" max_water_seen=", "%.3f" % dbg_max_water)
 	get_tree().quit()
 
 
@@ -779,6 +864,39 @@ func _update_cam() -> void:
 	var eye := Vector3(dist * cp * sin(yaw), dist * sin(pitch), -dist * cp * cos(yaw))
 	cam.position = eye
 	cam.look_at_from_position(cam_pivot.position + eye, cam_pivot.position, Vector3.UP)
+
+
+func _build_audio() -> void:
+	var player := AudioStreamPlayer.new()
+	var gen := AudioStreamGenerator.new()
+	gen.mix_rate = 22050.0
+	gen.buffer_length = 0.2
+	player.stream = gen
+	player.volume_db = -8.0
+	add_child(player)
+	player.play()
+	audio_pb = player.get_stream_playback()
+
+
+func _fill_audio() -> void:
+	# 程序化环境音:低通白噪声的海浪 + 高频沙沙声(挖/堆沙时)
+	if audio_pb == null:
+		return
+	var n := audio_pb.get_frames_available()
+	if n <= 0:
+		return
+	n = mini(n, 2048)
+	var amp := 0.10 + surge_now * 0.55
+	var cutoff := 0.035 + surge_now * 0.22
+	var brush_target := 0.5 if (brushing and tool_idx < 2) else 0.0
+	brush_env = lerpf(brush_env, brush_target, 0.12)
+	for i in n:
+		var w := randf() * 2.0 - 1.0
+		audio_lp += cutoff * (w - audio_lp)
+		var s := audio_lp * amp
+		if brush_env > 0.01:
+			s += (randf() * 2.0 - 1.0) * 0.22 * brush_env
+		audio_pb.push_frame(Vector2(s, s))
 
 
 func _build_environment() -> void:
