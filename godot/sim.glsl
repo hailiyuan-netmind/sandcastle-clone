@@ -14,6 +14,8 @@ layout(rgba32f, set = 0, binding = 1) uniform restrict writeonly image2D field_o
 layout(rgba32f, set = 0, binding = 2) uniform restrict image2D flux;
 layout(rgba32f, set = 0, binding = 3) uniform restrict image2D sflux;
 layout(set = 0, binding = 4, std430) restrict buffer Bucket { int delta_milli; int pad; } bucket;
+layout(set = 0, binding = 5, std430) restrict buffer Spawn { int count; int cursor; int pad2; int pad3; vec4 q[]; } SQ;
+layout(r32i, set = 0, binding = 6) uniform restrict iimage2D dep_img;
 
 layout(push_constant) uniform Params {
 	float dt; float sea; float surge; float damp;
@@ -26,6 +28,26 @@ const int TOOL_POUR = 0;
 const int TOOL_DIG = 1;
 const int TOOL_WATER = 2;
 const int TOOL_TAMP = 3;
+const int MAXQ = 512;
+
+float hash12(vec2 p) {
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
+}
+
+// 网格坐标→世界坐标(CELL=0.5, WORLD=192)
+vec3 cellWorld(ivec2 p, float y) {
+	return vec3(float(p.x) * 0.5 - 96.0 + 0.25, y, float(p.y) * 0.5 - 96.0 + 0.25);
+}
+
+void trySpawn(vec3 pos, vec3 vel, float mat) {
+	int idx = atomicAdd(SQ.count, 1);
+	if (idx < MAXQ) {
+		SQ.q[idx * 2] = vec4(pos, mat);
+		SQ.q[idx * 2 + 1] = vec4(vel, 0.0);
+	}
+}
 
 int N() { return int(P.n); }
 
@@ -95,6 +117,14 @@ void main() {
 		float foam = f.a * 0.94;
 		if (fl > 2.0 && w > 0.01) { foam = min(1.0, foam + (fl - 2.0) * P.dt * 1.4); }
 
+		// 激浪处喷水沫粒子(P.brate 槽位在非工具模式下传的是时间)
+		if (fl > 3.4 && w > 0.06 && hash12(vec2(p) + fract(P.brate) * 61.7) < 0.04) {
+			float dirx = (q.g - q.r + (inR - inL)) * 0.5;
+			float dirz = (q.a - q.b + (inB - inT)) * 0.5;
+			vec3 vel = vec3(dirx, 1.8 + fl * 0.25, dirz);
+			trySpawn(cellWorld(p, f.r + w + 0.25), vel, 0.0);
+		}
+
 		imageStore(field_out, p, vec4(f.r, w, m, foam));
 
 	} else if (mode == 2) {
@@ -124,6 +154,11 @@ void main() {
 					else if (mx == wq.g) { q.g += e; }
 					else if (mx == wq.b) { q.b += e; }
 					else { q.a += e; }
+					// 强侵蚀 → 沙粒飞溅进 MPM 层
+					if (e > 0.006 && hash12(vec2(p) * 1.7 + fract(P.brate) * 37.1) < 0.35) {
+						vec3 vel = vec3((wq.g - wq.r) * 0.4, 1.0 + fl * 0.15, (wq.a - wq.b) * 0.4);
+						trySpawn(cellWorld(p, f.r + 0.35), vel, 1.0);
+					}
 				}
 			}
 			float tot = q.r + q.g + q.b + q.a;
@@ -143,6 +178,10 @@ void main() {
 		float sand = f.r - (q.r + q.g + q.b + q.a) + (inL + inR + inT + inB);
 		float w = f.g;
 		float m = f.b;
+
+		// MPM 粒子沉积回高度场
+		int dep = imageAtomicExchange(dep_img, p, 0);
+		if (dep > 0) { sand += float(dep) * 0.001; }
 
 		int tool = int(P.tool);
 		if (tool != TOOL_NONE) {

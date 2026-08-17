@@ -78,9 +78,18 @@ Same tools, wave scheduler, flag and sand economy as the 2D version. Full simula
 - Water uses a J-based EOS; sand uses fixed corotated elasticity with snow-style plasticity, including a 3x3 SVD (Jacobi on F^T F) written directly in GLSL
 - P2G scatter uses fixed-point atomic adds; particles render as GPU point sprites fed by a `Texture2DRD` position texture, so nothing round-trips through the CPU
 - Run it: `godot --path godot mpm.tscn`. Right-drag orbits, wheel zooms, `R` resets, Space pauses. Headless: `-- --shot=out.png --frames=N` or `-- --record=dir --frames=N`
-- Next step: bound this solver to an active zone over the beach heightfield (heightfield as collision boundary, erosion spawns particles, settled particles deposit back)
+### Heightfield + MPM coupling (in the game)
 
-Still to close the gap with the real thing: heightfield-MPM coupling, sound, tide, scoring.
+The main beach scene now runs a bounded MPM active zone on top of the heightfield ([`godot/mpm_zone.glsl`](godot/mpm_zone.glsl)):
+
+![Wave ripping sand grains off the wall as particles](research/beach-mpm-coupled.gif)
+
+- The heightfield is the MPM collision boundary (bilinear height + slope normal response in the grid pass)
+- Strong erosion cells and churning foam cells emit spawn requests into a shared GPU queue; a ring-buffer pool of 32K particles consumes it, so waves visibly rip sand grains off walls and throw spray
+- Settled sand particles deposit their volume back into the heightfield through an atomic image, closing the mass loop; spent spray rejoins the sea
+- Everything stays on the GPU end to end, and the whole game still holds 60 fps on Apple Silicon
+
+Still to close the gap with the real thing: sound, tide, scoring, art pass.
 
 ## Roadmap ideas
 

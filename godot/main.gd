@@ -10,6 +10,19 @@ const N := 384            # 模拟网格分辨率
 const CELL := 0.5         # 每格世界尺寸
 const WORLD := N * CELL   # 世界边长 192,与旧版一致
 const SEA := 0.9
+# ---- MPM 活跃区(世界坐标) ----
+const ZPOOL := 32768
+const ZMAXQ := 512
+const ZGX := 192
+const ZGY := 16
+const ZGZ := 80
+const ZCELL := 0.75
+const ZORIGIN := Vector3(-72.0, 0.0, -18.0)
+const ZDT := 1.0 / 240.0
+const ZSUB := 4
+const ZE_SAND := 8000.0
+const ZE_WATER := 2500.0
+const ZGRAV := 25.0
 const TOOLS := ["pour", "dig", "water", "tamp", "flag"]
 const TOOL_LABELS := ["🏰 堆沙", "⛏ 挖沙", "💧 洒水", "🔨 夯实", "🚩 插旗"]
 
@@ -23,6 +36,16 @@ var bucket_buf: RID
 var uniform_sets := []
 var cur := 0
 var field_tex2d: Texture2DRD
+# MPM 活跃区资源
+var zshader: RID
+var zpipeline: RID
+var zpbuf: RID
+var zgrid: RID
+var spawn_buf: RID
+var dep_tex: RID
+var zpos_tex: RID
+var zuset: RID
+var zpos_tex2d: Texture2DRD
 
 var shadow: Image                 # low-rate CPU copy for picking / flag / stats
 var shadow_tick := 0
@@ -63,6 +86,7 @@ var tool_buttons := []
 
 var shot_path := ""
 var shot_frames := 90
+var record_dir := ""
 var demo := false
 var frame_count := 0
 
@@ -79,13 +103,18 @@ func _ready() -> void:
 		elif a == "--demo":
 			demo = true
 			auto_waves = false
+		elif a.begins_with("--record="):
+			record_dir = a.substr(9)
+			DirAccess.make_dir_recursive_absolute(record_dir)
 	_build_environment()
 	_build_camera()
 	var img := _gen_field_image()
 	shadow = img
 	_init_compute(img)
+	_init_mpm_zone()
 	_build_terrain()
 	_build_water()
+	_build_zone_particles()
 	_build_flag()
 	_build_hud()
 
@@ -133,6 +162,20 @@ func _init_compute(img: Image) -> void:
 	bzero.resize(8)
 	bucket_buf = rd.storage_buffer_create(8, bzero)
 
+	# 生成队列 + 沉积图(sim 与 MPM 两条管线共享)
+	var sq := PackedByteArray()
+	sq.resize(16 + ZMAXQ * 2 * 16)
+	spawn_buf = rd.storage_buffer_create(sq.size(), sq)
+	var dfmt := RDTextureFormat.new()
+	dfmt.width = N
+	dfmt.height = N
+	dfmt.format = RenderingDevice.DATA_FORMAT_R32_SINT
+	dfmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
+		+ RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	var dz := PackedByteArray()
+	dz.resize(N * N * 4)
+	dep_tex = rd.texture_create(dfmt, RDTextureView.new(), [dz])
+
 	for i in 2:
 		var us := []
 		for b in 4:
@@ -146,17 +189,81 @@ func _init_compute(img: Image) -> void:
 		ub.binding = 4
 		ub.add_id(bucket_buf)
 		us.append(ub)
+		var usq := RDUniform.new()
+		usq.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+		usq.binding = 5
+		usq.add_id(spawn_buf)
+		us.append(usq)
+		var ud := RDUniform.new()
+		ud.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		ud.binding = 6
+		ud.add_id(dep_tex)
+		us.append(ud)
 		uniform_sets.append(rd.uniform_set_create(us, shader_rid, 0))
 
 	field_tex2d = Texture2DRD.new()
 	field_tex2d.texture_rd_rid = field_tex[0]
 
 
+func _init_mpm_zone() -> void:
+	var src := load("res://mpm_zone.glsl") as RDShaderFile
+	zshader = rd.shader_create_from_spirv(src.get_spirv())
+	zpipeline = rd.compute_pipeline_create(zshader)
+
+	var pf := PackedFloat32Array()
+	pf.resize(ZPOOL * 32)
+	for i in ZPOOL:
+		pf[i * 32 + 1] = -1000.0   # y
+		pf[i * 32 + 3] = -1.0      # mat = inactive
+	zpbuf = rd.storage_buffer_create(ZPOOL * 128, pf.to_byte_array())
+	var gz := PackedByteArray()
+	gz.resize(ZGX * ZGY * ZGZ * 16)
+	zgrid = rd.storage_buffer_create(gz.size(), gz)
+
+	var fmt := RDTextureFormat.new()
+	fmt.width = 256
+	fmt.height = ZPOOL / 256
+	fmt.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
+	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
+		+ RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT + RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+	var zt := PackedByteArray()
+	zt.resize(fmt.width * fmt.height * 16)
+	zpos_tex = rd.texture_create(fmt, RDTextureView.new(), [zt])
+	zpos_tex2d = Texture2DRD.new()
+	zpos_tex2d.texture_rd_rid = zpos_tex
+
+	var ids := [zpbuf, zgrid, spawn_buf, dep_tex, field_tex[0], field_tex[1], zpos_tex]
+	var types := [
+		RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER,
+		RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER, RenderingDevice.UNIFORM_TYPE_IMAGE,
+		RenderingDevice.UNIFORM_TYPE_IMAGE, RenderingDevice.UNIFORM_TYPE_IMAGE,
+		RenderingDevice.UNIFORM_TYPE_IMAGE,
+	]
+	var us := []
+	for b in ids.size():
+		var u := RDUniform.new()
+		u.uniform_type = types[b]
+		u.binding = b
+		u.add_id(ids[b])
+		us.append(u)
+	zuset = rd.uniform_set_create(us, zshader, 0)
+
+
+func _zparams(mode: int) -> PackedByteArray:
+	var f := PackedFloat32Array([
+		ZDT, ZGRAV, float(mode), float(ZPOOL),
+		float(ZGX), float(ZGY), float(ZGZ), ZCELL,
+		ZORIGIN.x, ZORIGIN.y, ZORIGIN.z, float(cur),
+		ZE_SAND, ZE_WATER, float(ZMAXQ), float(N),
+	])
+	return f.to_byte_array()
+
+
 func _params(dt: float, surge: float, damp: float, mode: int, tool: int) -> PackedByteArray:
 	var f := PackedFloat32Array([
 		dt, SEA, surge, damp,
 		float(mode), float(N), float(tool), CELL * CELL,
-		brush_pos.x, brush_pos.y, brush_r, 9.0,
+		brush_pos.x, brush_pos.y, brush_r, 9.0 if mode == 3 else sim_time,
 	])
 	return f.to_byte_array()
 
@@ -192,6 +299,37 @@ func _sim_step(dt: float, surge: float) -> void:
 	rd.compute_list_end()
 	cur = 1 - cur
 	field_tex2d.texture_rd_rid = field_tex[cur]
+
+
+func _zone_step() -> void:
+	var cell_groups := (ZGX * ZGY * ZGZ + 63) / 64
+	var part_groups := (ZPOOL + 63) / 64
+	var spawn_groups := (ZMAXQ + 63) / 64
+	var cl := rd.compute_list_begin()
+	rd.compute_list_bind_compute_pipeline(cl, zpipeline)
+	rd.compute_list_bind_uniform_set(cl, zuset, 0)
+	var pc := _zparams(1)   # 消费生成队列
+	rd.compute_list_set_push_constant(cl, pc, pc.size())
+	rd.compute_list_dispatch(cl, spawn_groups, 1, 1)
+	rd.compute_list_add_barrier(cl)
+	for s in ZSUB:
+		pc = _zparams(0)
+		rd.compute_list_set_push_constant(cl, pc, pc.size())
+		rd.compute_list_dispatch(cl, cell_groups, 1, 1)
+		rd.compute_list_add_barrier(cl)
+		pc = _zparams(2)
+		rd.compute_list_set_push_constant(cl, pc, pc.size())
+		rd.compute_list_dispatch(cl, part_groups, 1, 1)
+		rd.compute_list_add_barrier(cl)
+		pc = _zparams(3)
+		rd.compute_list_set_push_constant(cl, pc, pc.size())
+		rd.compute_list_dispatch(cl, cell_groups, 1, 1)
+		rd.compute_list_add_barrier(cl)
+		pc = _zparams(4)
+		rd.compute_list_set_push_constant(cl, pc, pc.size())
+		rd.compute_list_dispatch(cl, part_groups, 1, 1)
+		rd.compute_list_add_barrier(cl)
+	rd.compute_list_end()
 
 
 # ---------------- game loop ----------------
@@ -239,8 +377,12 @@ func _process(delta: float) -> void:
 		_demo_tick()
 	elif brushing and tool_idx < 4:
 		_update_brush_from_mouse()
+	var zero4 := PackedByteArray()
+	zero4.resize(4)
+	rd.buffer_update(spawn_buf, 0, 4, zero4)   # 每帧清零生成计数(游标保留)
 	for s in 2:
 		_sim_step(dt * 0.5, surge)
+	_zone_step()
 
 	shadow_tick += 1
 	if shadow_tick % 6 == 0:
@@ -253,7 +395,14 @@ func _process(delta: float) -> void:
 		if msg_timer <= 0.0:
 			hud_msg.text = ""
 
-	if shot_path != "" and frame_count == shot_frames:
+	if record_dir != "":
+		if frame_count % 3 == 0 and frame_count <= shot_frames:
+			var img := get_viewport().get_texture().get_image()
+			img.save_png(record_dir + "/r%04d.png" % frame_count)
+		if frame_count > shot_frames:
+			print("recording done: ", record_dir)
+			get_tree().quit()
+	elif shot_path != "" and frame_count == shot_frames:
 		_take_shot()
 
 
@@ -327,6 +476,24 @@ func _update_brush_from_mouse() -> void:
 
 
 # ---------------- flag ----------------
+
+func _build_zone_particles() -> void:
+	var verts := PackedVector3Array()
+	verts.resize(ZPOOL)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_POINTS, arrays)
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://zone_particles.gdshader")
+	mat.set_shader_parameter("pos_tex", zpos_tex2d)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.extra_cull_margin = 256.0
+	add_child(mi)
+
 
 func _build_flag() -> void:
 	flag_node = Node3D.new()
@@ -550,12 +717,19 @@ func _exit_tree() -> void:
 	if rd == null:
 		return
 	field_tex2d.texture_rd_rid = RID()
+	zpos_tex2d.texture_rd_rid = RID()
 	RenderingServer.call_on_render_thread(func() -> void:
 		for t in field_tex:
 			rd.free_rid(t)
 		rd.free_rid(flux_tex)
 		rd.free_rid(sflux_tex)
 		rd.free_rid(bucket_buf)
+		rd.free_rid(spawn_buf)
+		rd.free_rid(dep_tex)
+		rd.free_rid(zpbuf)
+		rd.free_rid(zgrid)
+		rd.free_rid(zpos_tex)
+		rd.free_rid(zshader)
 		rd.free_rid(shader_rid))
 
 
